@@ -1,7 +1,10 @@
 {
-  "name": "openobserve-mcp",
+  "name": "@jokezc/openobserve-mcp",
   "version": "0.1.0",
   "description": "OpenObserve MCP server for logs, traces, and troubleshooting workflows",
+  "bin": {
+    "openobserve-mcp": "src/index.js"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js"
@@ -16,6 +19,20 @@
   "author": "",
   "license": "MIT",
   "type": "module",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    ".env.example",
+    "AI_USAGE.md",
+    "AI_SYSTEM_PROMPT.zh-CN.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^17.4.2",

@@ -82,6 +82,38 @@ npm start
 
 如果进程正常启动，它会等待 MCP Client 通过 `stdio` 连接。
 
+## 直接给别人用
+
+如果你把这个包发布到 npm，别人可以不 clone 仓库，直接通过 `npx` 使用。
+
+客户端配置可以写成这样：
+
+```json
+{
+  "mcpServers": {
+    "openobserve": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@jokezc/openobserve-mcp"
+      ],
+      "env": {
+        "OPENOBSERVE_BASE_URL": "http://192.168.1.54:5080",
+        "OPENOBSERVE_ORG_ID": "default",
+        "OPENOBSERVE_AUTH_TOKEN": "Basic xxx",
+        "OPENOBSERVE_DEFAULT_LOG_STREAM": "your_log_stream",
+        "OPENOBSERVE_DEFAULT_TRACE_STREAM": "your_trace_stream"
+      }
+    }
+  }
+}
+```
+
+## 本地仓库方式接入
+
+如果还没发 npm，也可以先让别人 clone 仓库后本地接入。
+
 ## Cherry Studio / Studio 接入
 
 可执行命令：
@@ -122,6 +154,26 @@ C:\sourceCode\nodejs\openobserve-mcp
   }
 }
 ```
+
+## 发布到 npm
+
+发布前至少确认：
+
+1. 已登录 npm：
+
+```bash
+npm login
+```
+
+2. 当前推荐直接使用 scoped 包名：`@jokezc/openobserve-mcp`
+
+3. 发布：
+
+```bash
+npm publish --access public
+```
+
+发布完成后，别人就可以直接用 `npx -y @jokezc/openobserve-mcp` 接入。
 
 ## Tool 设计说明
 
