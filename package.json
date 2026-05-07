@@ -1,0 +1,24 @@
+{
+  "name": "openobserve-mcp",
+  "version": "0.1.0",
+  "description": "OpenObserve MCP server for logs, traces, and troubleshooting workflows",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "openobserve",
+    "observability",
+    "logs",
+    "traces"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.4.2",
+    "zod": "^4.4.3"
+  }
+}
