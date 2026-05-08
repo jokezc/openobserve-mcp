@@ -1,9 +1,14 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "./config.js";
 import { OpenObserveClient } from "./openobserve-client.js";
 import { registerTools } from "./tools.js";
+
+const packageJson = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+);
 
 const config = loadConfig();
 const client = new OpenObserveClient(config);
@@ -11,7 +16,7 @@ const client = new OpenObserveClient(config);
 const server = new McpServer(
   {
     name: "openobserve-mcp",
-    version: "0.1.0",
+    version: packageJson.version,
   },
   {
     instructions: [

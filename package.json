@@ -1,6 +1,6 @@
 {
   "name": "@jokezc/openobserve-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "OpenObserve MCP server for logs, traces, and troubleshooting workflows",
   "bin": {
     "openobserve-mcp": "src/index.js"
