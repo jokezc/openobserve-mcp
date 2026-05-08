@@ -20,6 +20,10 @@ function textResult(title, data) {
 }
 
 function clamp(value, max) {
+  if (max === undefined || max === null || max <= 0) {
+    return Math.max(1, value);
+  }
+
   return Math.max(1, Math.min(value, max));
 }
 
@@ -31,9 +35,10 @@ function withTimeRange(config, input, defaults) {
   return resolveTimeRange({
     startTime: input.startTime,
     endTime: input.endTime,
-    lookbackMinutes: input.lookbackMinutes,
-    defaultLookbackMinutes: defaults.defaultLookbackMinutes,
-    maxHours: config.maxHours,
+    lookback: input.lookback,
+    defaultLookback: defaults.defaultLookback ?? config.defaultLookback,
+    maxRangeMicros: config.maxRangeMicros,
+    maxRangeLabel: config.maxRangeLabel,
   });
 }
 
@@ -129,6 +134,162 @@ function extractTraceNodes(response) {
   return Array.isArray(response?.nodes) ? response.nodes : [];
 }
 
+function isSummaryOnlySearchResult(response) {
+  if (!Array.isArray(response?.hits) || response.hits.length === 0) {
+    return false;
+  }
+
+  return response.hits.every((hit) => {
+    const keys = Object.keys(hit ?? {});
+    return keys.length > 0 && keys.every((key) => key.startsWith("zo_sql_"));
+  });
+}
+
+function summarizeSearchResponse(response) {
+  return {
+    total: response?.total ?? 0,
+    hitCount: Array.isArray(response?.hits) ? response.hits.length : 0,
+    summaryOnly: isSummaryOnlySearchResult(response),
+    traceId: response?.trace_id ?? null,
+    took: response?.took ?? null,
+    scanRecords: response?.scan_records ?? null,
+    scanSize: response?.scan_size ?? null,
+  };
+}
+
+function buildPagination(limit, offset = 0, total = null) {
+  const effectiveTotal = typeof total === "number" ? total : null;
+  const nextOffset = effectiveTotal !== null && offset + limit >= effectiveTotal
+    ? null
+    : offset + limit;
+
+  return {
+    limit,
+    offset,
+    total: effectiveTotal,
+    nextOffset,
+  };
+}
+
+function buildSearchResultPayload(config, response) {
+  const summary = summarizeSearchResponse(response);
+  const warning = summary.summaryOnly
+    ? "This OpenObserve instance returned summary-only search hits for _search. The count is valid, but raw rows were not returned by the backend."
+    : null;
+
+  return {
+    summary,
+    warning,
+    result: sanitize(config, response),
+  };
+}
+
+function paginateSearchValuesResult(response, offset, limit) {
+  if (!response || typeof response !== "object") {
+    return {
+      result: response,
+      pagination: buildPagination(limit, offset, null),
+      warning: "The _values response shape was not recognized for pagination; returned the raw payload.",
+    };
+  }
+
+  if (Array.isArray(response?.hits)) {
+    return {
+      result: {
+        ...response,
+        hits: response.hits.slice(offset, offset + limit),
+        from: offset,
+        size: limit,
+      },
+      pagination: buildPagination(limit, offset, response?.total ?? null),
+      warning: "The _values endpoint is being paginated through its returned hits payload.",
+    };
+  }
+
+  const paged = Array.isArray(response)
+    ? response.slice(offset, offset + limit)
+    : Object.fromEntries(
+        Object.entries(response).map(([field, values]) => [
+          field,
+          Array.isArray(values) ? values.slice(offset, offset + limit) : values,
+        ]),
+      );
+
+  const totalCandidates = Array.isArray(response)
+    ? [response.length]
+    : Object.values(response)
+        .filter(Array.isArray)
+        .map((values) => values.length);
+  const total = totalCandidates.length > 0 ? Math.max(...totalCandidates) : null;
+
+  return {
+    result: paged,
+    pagination: buildPagination(limit, offset, total),
+    warning: "The _values endpoint does not expose native pagination here, so pagination is applied by slicing the returned value lists in-memory.",
+  };
+}
+
+function isTraceDagSchemaMismatch(error) {
+  return String(error?.message ?? error).includes("llm_observation_type");
+}
+
+function summarizeTraceAggregate(hit) {
+  const services = Array.isArray(hit?.service_name)
+    ? hit.service_name.map((item) => item?.service_name).filter(Boolean)
+    : [];
+
+  return {
+    source: "traces_latest_fallback",
+    serviceCount: services.length,
+    services,
+    spanCount: Array.isArray(hit?.spans) ? (hit.spans[0] ?? null) : null,
+    edgeCount: null,
+    durationMicros: hit?.duration ?? null,
+    firstEventTimestamp: hit?.first_event?._timestamp ?? null,
+    rootOperations: hit?.first_event
+      ? [{
+          service_name: hit.first_event.service_name ?? null,
+          operation_name: hit.first_event.operation_name ?? null,
+          span_status: hit.first_event.span_status ?? null,
+        }]
+      : [],
+  };
+}
+
+async function getTraceDataWithFallback(client, { streamName, traceId, startTime, endTime }) {
+  try {
+    const dag = await client.getTraceDag({
+      streamName,
+      traceId,
+      startTime,
+      endTime,
+    });
+
+    return {
+      mode: "dag",
+      data: dag,
+      warning: null,
+    };
+  } catch (error) {
+    if (!isTraceDagSchemaMismatch(error)) {
+      throw error;
+    }
+
+    const aggregate = await client.findTraceById({
+      streamName,
+      traceId,
+      startTime,
+      endTime,
+    });
+
+    return {
+      mode: "latest_traces_fallback",
+      data: aggregate,
+      warning: "Trace DAG endpoint failed on this OpenObserve instance because the backend queried a missing field (llm_observation_type). Returned a trace aggregate from /traces/latest instead.",
+    };
+  }
+}
+
 function normalizeSql(sql) {
   return sql.trim().replace(/;+\s*$/, "");
 }
@@ -189,31 +350,33 @@ export function registerTools(server, client, config) {
       inputSchema: {
         sql: z.string().describe("Read-only SELECT SQL query."),
         streamType: z.enum(["logs", "metrics", "traces"]).optional().describe("OpenObserve stream type for the query."),
-        lookbackMinutes: z.number().int().positive().max(24 * 60).optional().describe("Relative time range in minutes. Ignored if startTime and endTime are both provided."),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
         startTime: z.number().int().optional().describe("Start time in microseconds."),
         endTime: z.number().int().optional().describe("End time in microseconds."),
-        limit: z.number().int().positive().max(1000).optional().describe("Maximum rows requested from OpenObserve for this query."),
+        limit: z.number().int().positive().optional().describe("Maximum rows requested from OpenObserve for this query."),
         offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
       },
     },
     async (input) => {
-      const { startTime, endTime } = withTimeRange(config, input, { defaultLookbackMinutes: 60 });
+      const { startTime, endTime } = withTimeRange(config, input, {});
       const sql = assertReadOnlySql(input.sql);
-      const limit = clamp(input.limit ?? 100, 1000);
+      const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
+      const offset = input.offset ?? 0;
       const response = await client.search({
         sql,
         streamType: input.streamType ?? "logs",
         startTime,
         endTime,
         size: limit,
-        from: input.offset ?? 0,
+        from: offset,
       });
 
       return textResult("SQL search results", {
         streamType: input.streamType ?? "logs",
         sql,
         range: client.describeRange(startTime, endTime),
-        result: sanitize(config, response),
+        pagination: buildPagination(limit, offset, response?.total ?? null),
+        ...buildSearchResultPayload(config, response),
       });
     },
   );
@@ -284,10 +447,11 @@ export function registerTools(server, client, config) {
         streamName: z.string().optional().describe("Log stream name. Defaults to OPENOBSERVE_DEFAULT_LOG_STREAM when set."),
         fields: z.array(z.string()).min(1).max(10).describe("Field names to inspect."),
         keyword: z.string().optional().describe("Optional prefix/keyword filter supported by OpenObserve."),
-        lookbackMinutes: z.number().int().positive().max(24 * 60).optional(),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
         startTime: z.number().int().optional(),
         endTime: z.number().int().optional(),
-        limit: z.number().int().positive().max(100).optional().describe("Maximum values per field to return."),
+        limit: z.number().int().positive().optional().describe("Maximum values per field to return."),
+        offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
         noCount: z.boolean().optional().describe("When true, skip count calculation if supported by the backend."),
       },
     },
@@ -297,23 +461,27 @@ export function registerTools(server, client, config) {
         throw new Error("streamName is required unless OPENOBSERVE_DEFAULT_LOG_STREAM is configured");
       }
 
-      const { startTime, endTime } = withTimeRange(config, input, { defaultLookbackMinutes: 60 });
-      const limit = clamp(input.limit ?? 20, 100);
+      const { startTime, endTime } = withTimeRange(config, input, {});
+      const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
+      const offset = input.offset ?? 0;
       const response = await client.searchValues({
         streamName,
         fields: input.fields,
         startTime,
         endTime,
-        size: limit,
+        size: offset + limit,
         keyword: input.keyword ?? "",
         noCount: input.noCount ?? false,
       });
+      const pagedResult = paginateSearchValuesResult(response, offset, limit);
 
       return textResult("Field values", {
         streamName,
         fields: input.fields,
         range: client.describeRange(startTime, endTime),
-        result: sanitize(config, response),
+        pagination: pagedResult.pagination,
+        paginationWarning: pagedResult.warning,
+        result: sanitize(config, pagedResult.result),
       });
     },
   );
@@ -328,10 +496,11 @@ export function registerTools(server, client, config) {
         keyword: z.string().optional().describe("Keyword to search for. Searches all text fields by default."),
         keywordField: z.string().optional().describe("Optional field name for keyword matching."),
         filters: z.record(z.union([z.string(), z.number(), z.boolean()])).optional().describe("Optional equality filters, for example {\"service_name\":\"api\"}."),
-        lookbackMinutes: z.number().int().positive().max(24 * 60).optional().describe("Relative time range in minutes. Ignored if startTime and endTime are both provided."),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
         startTime: z.number().int().optional().describe("Start time in microseconds."),
         endTime: z.number().int().optional().describe("End time in microseconds."),
-        limit: z.number().int().positive().max(100).optional().describe("Maximum rows to return."),
+        limit: z.number().int().positive().optional().describe("Maximum rows to return."),
+        offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
       },
     },
     async (input) => {
@@ -340,8 +509,9 @@ export function registerTools(server, client, config) {
         throw new Error("streamName is required unless OPENOBSERVE_DEFAULT_LOG_STREAM is configured");
       }
 
-      const { startTime, endTime } = withTimeRange(config, input, { defaultLookbackMinutes: 30 });
-      const limit = clamp(input.limit ?? 20, config.maxLogRows);
+      const { startTime, endTime } = withTimeRange(config, input, {});
+      const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
+      const offset = input.offset ?? 0;
       const clauses = [
         input.keyword ? buildContainsClause(input.keywordField, input.keyword) : undefined,
         ...buildEqualityClauses(input.filters),
@@ -355,13 +525,15 @@ export function registerTools(server, client, config) {
         startTime,
         endTime,
         size: limit,
+        from: offset,
       });
 
       return textResult("Log search results", {
         streamName,
         sql,
         range: client.describeRange(startTime, endTime),
-        result: sanitize(config, response),
+        pagination: buildPagination(limit, offset, response?.total ?? null),
+        ...buildSearchResultPayload(config, response),
       });
     },
   );
@@ -377,10 +549,11 @@ export function registerTools(server, client, config) {
         serviceField: z.string().optional().describe("Optional field to group by service."),
         serviceName: z.string().optional().describe("Optional service filter."),
         keyword: z.string().optional().describe("Optional keyword to narrow the error set."),
-        lookbackMinutes: z.number().int().positive().max(24 * 60).optional(),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
         startTime: z.number().int().optional(),
         endTime: z.number().int().optional(),
-        limit: z.number().int().positive().max(50).optional(),
+        limit: z.number().int().positive().optional(),
+        offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
       },
     },
     async (input) => {
@@ -389,8 +562,9 @@ export function registerTools(server, client, config) {
         throw new Error("streamName is required unless OPENOBSERVE_DEFAULT_LOG_STREAM is configured");
       }
 
-      const { startTime, endTime } = withTimeRange(config, input, { defaultLookbackMinutes: 30 });
-      const limit = clamp(input.limit ?? 10, 50);
+      const { startTime, endTime } = withTimeRange(config, input, {});
+      const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
+      const offset = input.offset ?? 0;
       const messageField = input.messageField ?? "log";
       const filters = input.serviceField && input.serviceName
         ? { [input.serviceField]: input.serviceName }
@@ -425,13 +599,15 @@ export function registerTools(server, client, config) {
         startTime,
         endTime,
         size: limit,
+        from: offset,
       });
 
       return textResult("Top errors", {
         streamName,
         sql,
         range: client.describeRange(startTime, endTime),
-        result: sanitize(config, response),
+        pagination: buildPagination(limit, offset, response?.total ?? null),
+        ...buildSearchResultPayload(config, response),
       });
     },
   );
@@ -445,21 +621,25 @@ export function registerTools(server, client, config) {
         streamType: z.enum(["logs", "metrics", "traces"]).optional(),
         keyword: z.string().optional(),
         offset: z.number().int().min(0).optional(),
-        limit: z.number().int().positive().max(100).optional(),
+        limit: z.number().int().positive().optional(),
         sort: z.string().optional().describe("OpenObserve sort field, for example name or stats.doc_num."),
       },
     },
     async (input) => {
-      const limit = clamp(input.limit ?? 20, config.maxStreamRows);
+      const limit = clamp(input.limit ?? config.defaultStreamRows, config.maxStreamRows);
+      const offset = input.offset ?? 0;
       const response = await client.listStreams({
         streamType: input.streamType ?? "logs",
         keyword: input.keyword ?? "",
-        offset: input.offset ?? 0,
+        offset,
         limit,
         sort: input.sort ?? "name",
       });
 
-      return textResult("Streams", sanitize(config, response));
+      return textResult("Streams", {
+        pagination: buildPagination(limit, offset, response?.total ?? null),
+        result: sanitize(config, response),
+      });
     },
   );
 
@@ -471,7 +651,7 @@ export function registerTools(server, client, config) {
       inputSchema: {
         streamName: z.string().optional(),
         timestamp: z.number().int().describe("Target log _timestamp in microseconds."),
-        size: z.number().int().positive().max(100).optional().describe("Total nearby rows to fetch."),
+        size: z.number().int().positive().optional().describe("Total nearby rows to fetch."),
       },
     },
     async (input) => {
@@ -480,7 +660,7 @@ export function registerTools(server, client, config) {
         throw new Error("streamName is required unless OPENOBSERVE_DEFAULT_LOG_STREAM is configured");
       }
 
-      const size = clamp(input.size ?? 20, config.maxLogRows);
+      const size = clamp(input.size ?? config.defaultLogRows, config.maxLogRows);
       const response = await client.searchAround({
         streamName,
         key: input.timestamp,
@@ -508,10 +688,11 @@ export function registerTools(server, client, config) {
         logTraceField: z.string().optional().describe("Override the log field that stores trace IDs."),
         logSpanField: z.string().optional().describe("Override the log field that stores span IDs."),
         logServiceField: z.string().optional().describe("Override the log field that stores service names."),
-        lookbackMinutes: z.number().int().positive().max(24 * 60).optional(),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
         startTime: z.number().int().optional(),
         endTime: z.number().int().optional(),
-        limit: z.number().int().positive().max(100).optional().describe("Maximum related logs to return."),
+        limit: z.number().int().positive().optional().describe("Maximum related logs to return."),
+        offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
       },
     },
     async (input) => {
@@ -525,13 +706,14 @@ export function registerTools(server, client, config) {
         throw new Error("logStreamName is required unless OPENOBSERVE_DEFAULT_LOG_STREAM is configured");
       }
 
-      const { startTime, endTime } = withTimeRange(config, input, { defaultLookbackMinutes: 60 });
-      const trace = await client.getTraceDag({
+      const { startTime, endTime } = withTimeRange(config, input, {});
+      const traceData = await getTraceDataWithFallback(client, {
         streamName: traceStreamName,
         traceId: input.traceId,
         startTime,
         endTime,
       });
+      const trace = traceData.data;
 
       const logSchema = await client.getStreamSchema({
         streamName: logStreamName,
@@ -539,9 +721,13 @@ export function registerTools(server, client, config) {
       });
       const schemaRows = normalizeSchemaRows(logSchema);
       const inferredFields = inferCorrelationFields(schemaRows);
-      const nodes = extractTraceNodes(trace);
+      const nodes = traceData.mode === "dag" ? extractTraceNodes(trace) : [];
       const spanIds = [...new Set(nodes.map((node) => node.span_id).filter(Boolean))].slice(0, 20);
-      const serviceNames = [...new Set(nodes.map((node) => node.service_name).filter(Boolean))].slice(0, 10);
+      const serviceNames = traceData.mode === "dag"
+        ? [...new Set(nodes.map((node) => node.service_name).filter(Boolean))].slice(0, 10)
+        : (Array.isArray(trace?.service_name)
+            ? trace.service_name.map((item) => item?.service_name).filter(Boolean).slice(0, 10)
+            : []);
 
       const logTraceField = input.logTraceField ?? inferredFields.traceIdField;
       const logSpanField = input.logSpanField ?? inferredFields.spanIdField;
@@ -567,7 +753,8 @@ export function registerTools(server, client, config) {
         throw new Error("Could not infer correlation fields from the log stream schema. Provide logTraceField, logSpanField, or logServiceField.");
       }
 
-      const limit = clamp(input.limit ?? 50, config.maxLogRows);
+      const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
+      const offset = input.offset ?? 0;
       const sql = `SELECT * FROM ${quoteIdentifierForFrom(logStreamName)}${buildWhereClause([correlationClause])} ORDER BY _timestamp DESC LIMIT ${limit}`;
       const relatedLogs = await client.search({
         sql,
@@ -575,16 +762,21 @@ export function registerTools(server, client, config) {
         startTime,
         endTime,
         size: limit,
+        from: offset,
       });
 
-      const services = [...new Set(nodes.map((node) => node.service_name).filter(Boolean))];
-      const rootSpans = nodes.filter((node) => !node.parent_span_id);
+      const services = traceData.mode === "dag"
+        ? [...new Set(nodes.map((node) => node.service_name).filter(Boolean))]
+        : serviceNames;
+      const rootSpans = traceData.mode === "dag" ? nodes.filter((node) => !node.parent_span_id) : [];
 
       return textResult("Correlated logs and trace", {
         traceId: input.traceId,
         traceStreamName,
         logStreamName,
         range: client.describeRange(startTime, endTime),
+        traceSource: traceData.mode,
+        traceWarning: traceData.warning,
         correlation: {
           inferredFields: {
             logTraceField,
@@ -594,19 +786,23 @@ export function registerTools(server, client, config) {
           matchedServices: serviceNames,
           matchedSpanCount: spanIds.length,
         },
-        traceSummary: {
-          serviceCount: services.length,
-          services,
-          spanCount: nodes.length,
-          edgeCount: Array.isArray(trace?.edges) ? trace.edges.length : 0,
-          rootOperations: rootSpans.map((node) => ({
-            service_name: node.service_name,
-            operation_name: node.operation_name,
-            span_status: node.span_status,
-          })),
-        },
-        relatedLogs: sanitize(config, relatedLogs),
-        traceDag: sanitize(config, trace),
+        pagination: buildPagination(limit, offset, relatedLogs?.total ?? null),
+        traceSummary: traceData.mode === "dag"
+          ? {
+              source: "dag",
+              serviceCount: services.length,
+              services,
+              spanCount: nodes.length,
+              edgeCount: Array.isArray(trace?.edges) ? trace.edges.length : 0,
+              rootOperations: rootSpans.map((node) => ({
+                service_name: node.service_name,
+                operation_name: node.operation_name,
+                span_status: node.span_status,
+              })),
+            }
+          : summarizeTraceAggregate(trace),
+        relatedLogs: buildSearchResultPayload(config, relatedLogs),
+        traceData: sanitize(config, trace),
       });
     },
   );
@@ -619,10 +815,11 @@ export function registerTools(server, client, config) {
       inputSchema: {
         streamName: z.string().optional(),
         filter: z.string().optional().describe("OpenObserve trace filter expression, for example service_name='gateway'."),
-        lookbackMinutes: z.number().int().positive().max(24 * 60).optional(),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
         startTime: z.number().int().optional(),
         endTime: z.number().int().optional(),
-        limit: z.number().int().positive().max(100).optional(),
+        limit: z.number().int().positive().optional(),
+        offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
       },
     },
     async (input) => {
@@ -631,11 +828,13 @@ export function registerTools(server, client, config) {
         throw new Error("streamName is required unless OPENOBSERVE_DEFAULT_TRACE_STREAM is configured");
       }
 
-      const { startTime, endTime } = withTimeRange(config, input, { defaultLookbackMinutes: 30 });
-      const limit = clamp(input.limit ?? 20, config.maxLogRows);
+      const { startTime, endTime } = withTimeRange(config, input, {});
+      const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
+      const offset = input.offset ?? 0;
       const response = await client.getLatestTraces({
         streamName,
         filter: input.filter,
+        from: offset,
         startTime,
         endTime,
         size: limit,
@@ -646,6 +845,7 @@ export function registerTools(server, client, config) {
       return textResult("Slow traces", {
         streamName,
         range: client.describeRange(startTime, endTime),
+        pagination: buildPagination(limit, offset, response?.total ?? null),
         result: sanitize(config, response),
       });
     },
@@ -659,7 +859,7 @@ export function registerTools(server, client, config) {
       inputSchema: {
         streamName: z.string().optional(),
         traceId: z.string(),
-        lookbackMinutes: z.number().int().positive().max(24 * 60).optional(),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
         startTime: z.number().int().optional(),
         endTime: z.number().int().optional(),
       },
@@ -670,13 +870,25 @@ export function registerTools(server, client, config) {
         throw new Error("streamName is required unless OPENOBSERVE_DEFAULT_TRACE_STREAM is configured");
       }
 
-      const { startTime, endTime } = withTimeRange(config, input, { defaultLookbackMinutes: 60 });
-      const response = await client.getTraceDag({
+      const { startTime, endTime } = withTimeRange(config, input, {});
+      const traceData = await getTraceDataWithFallback(client, {
         streamName,
         traceId: input.traceId,
         startTime,
         endTime,
       });
+      const response = traceData.data;
+
+      if (traceData.mode !== "dag") {
+        return textResult("Trace summary", {
+          traceId: input.traceId,
+          streamName,
+          range: client.describeRange(startTime, endTime),
+          warning: traceData.warning,
+          summary: summarizeTraceAggregate(response),
+          trace: sanitize(config, response),
+        });
+      }
 
       const nodes = Array.isArray(response?.nodes) ? response.nodes : [];
       const services = [...new Set(nodes.map((node) => node.service_name).filter(Boolean))];
@@ -687,7 +899,9 @@ export function registerTools(server, client, config) {
         traceId: input.traceId,
         streamName,
         range: client.describeRange(startTime, endTime),
+        warning: traceData.warning,
         summary: {
+          source: "dag",
           serviceCount: services.length,
           services,
           spanCount: nodes.length,
@@ -712,7 +926,7 @@ export function registerTools(server, client, config) {
       inputSchema: {
         streamName: z.string().optional(),
         traceId: z.string(),
-        lookbackMinutes: z.number().int().positive().max(24 * 60).optional(),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
         startTime: z.number().int().optional(),
         endTime: z.number().int().optional(),
       },
@@ -723,13 +937,26 @@ export function registerTools(server, client, config) {
         throw new Error("streamName is required unless OPENOBSERVE_DEFAULT_TRACE_STREAM is configured");
       }
 
-      const { startTime, endTime } = withTimeRange(config, input, { defaultLookbackMinutes: 60 });
-      const response = await client.getTraceDag({
+      const { startTime, endTime } = withTimeRange(config, input, {});
+      const traceData = await getTraceDataWithFallback(client, {
         streamName,
         traceId: input.traceId,
         startTime,
         endTime,
       });
+      const response = traceData.data;
+
+      if (traceData.mode !== "dag") {
+        return textResult("Trace detail", {
+          traceId: input.traceId,
+          streamName,
+          range: client.describeRange(startTime, endTime),
+          warning: traceData.warning,
+          summary: summarizeTraceAggregate(response),
+          traceAggregate: sanitize(config, response),
+        });
+      }
+
       const nodes = extractTraceNodes(response);
       const services = [...new Set(nodes.map((node) => node.service_name).filter(Boolean))];
 
@@ -737,7 +964,9 @@ export function registerTools(server, client, config) {
         traceId: input.traceId,
         streamName,
         range: client.describeRange(startTime, endTime),
+        warning: traceData.warning,
         summary: {
+          source: "dag",
           spanCount: nodes.length,
           edgeCount: Array.isArray(response?.edges) ? response.edges.length : 0,
           serviceCount: services.length,

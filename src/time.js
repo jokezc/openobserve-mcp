@@ -1,38 +1,64 @@
 const MICROS_IN_SECOND = 1_000_000;
 const MICROS_IN_MINUTE = 60 * MICROS_IN_SECOND;
 const MICROS_IN_HOUR = 60 * MICROS_IN_MINUTE;
+const MICROS_IN_DAY = 24 * MICROS_IN_HOUR;
 
 export function nowMicros() {
   return Date.now() * 1_000;
 }
 
-export function hoursToMicros(hours) {
-  return hours * MICROS_IN_HOUR;
-}
+export function parseDurationToMicros(value, label = "duration") {
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be a string like 7d, 12h, 30m, or 45s`);
+  }
 
-export function minutesToMicros(minutes) {
-  return minutes * MICROS_IN_MINUTE;
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, "");
+  if (!normalized) {
+    throw new Error(`${label} must not be empty`);
+  }
+
+  let total = 0;
+  let matched = 0;
+  const pattern = /(\d+)([dhms])/g;
+  for (const match of normalized.matchAll(pattern)) {
+    matched += match[0].length;
+    const amount = Number.parseInt(match[1], 10);
+    const unit = match[2];
+
+    if (unit === "d") total += amount * MICROS_IN_DAY;
+    if (unit === "h") total += amount * MICROS_IN_HOUR;
+    if (unit === "m") total += amount * MICROS_IN_MINUTE;
+    if (unit === "s") total += amount * MICROS_IN_SECOND;
+  }
+
+  if (matched !== normalized.length || total < 0) {
+    throw new Error(`${label} must look like 7d, 12h, 30m, 45s, or 1d12h30m`);
+  }
+
+  return total;
 }
 
 export function resolveTimeRange({
   startTime,
   endTime,
-  lookbackMinutes,
-  defaultLookbackMinutes,
-  maxHours,
+  lookback,
+  defaultLookback,
+  maxRangeMicros,
+  maxRangeLabel,
 }) {
   const now = nowMicros();
   const effectiveEnd = endTime ?? now;
-  const fallbackMinutes = lookbackMinutes ?? defaultLookbackMinutes;
-  const effectiveStart = startTime ?? (effectiveEnd - minutesToMicros(fallbackMinutes));
+  const fallbackLookback = lookback ?? defaultLookback;
+  const effectiveStart = startTime ?? (effectiveEnd - parseDurationToMicros(fallbackLookback, "lookback"));
 
   if (effectiveStart >= effectiveEnd) {
     throw new Error("startTime must be smaller than endTime");
   }
 
-  const maxRange = hoursToMicros(maxHours);
-  if ((effectiveEnd - effectiveStart) > maxRange) {
-    throw new Error(`Requested time range exceeds ${maxHours} hours`);
+  if (maxRangeMicros > 0) {
+    if ((effectiveEnd - effectiveStart) > maxRangeMicros) {
+      throw new Error(`Requested time range exceeds ${maxRangeLabel ?? "the configured maximum range"}`);
+    }
   }
 
   return {

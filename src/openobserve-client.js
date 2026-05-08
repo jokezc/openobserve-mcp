@@ -1,10 +1,6 @@
 import { formatMicros } from "./time.js";
 
 function buildAuthorizationHeader(config) {
-  if (config.authToken) {
-    return config.authToken;
-  }
-
   const token = Buffer.from(`${config.username}:${config.password}`).toString("base64");
   return `Basic ${token}`;
 }
@@ -78,8 +74,6 @@ export class OpenObserveClient {
           end_time: endTime,
           from,
           size,
-          quick_mode: true,
-          track_total_hits: true,
         },
       },
     });
@@ -179,6 +173,25 @@ export class OpenObserveClient {
         sort_order: sortOrder,
       },
     });
+  }
+
+  async findTraceById({ streamName, traceId, startTime, endTime }) {
+    const response = await this.getLatestTraces({
+      streamName,
+      filter: `trace_id = '${String(traceId).replaceAll("'", "''")}'`,
+      startTime,
+      endTime,
+      size: 1,
+      sortBy: "duration",
+      sortOrder: "desc",
+    });
+
+    const hit = Array.isArray(response?.hits) ? response.hits[0] : undefined;
+    if (!hit) {
+      throw new Error(`Trace not found: ${traceId} (${streamName})`);
+    }
+
+    return hit;
   }
 
   async getTraceDag({ streamName, traceId, startTime, endTime }) {

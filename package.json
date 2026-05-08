@@ -1,6 +1,6 @@
 {
   "name": "@jokezc/openobserve-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenObserve MCP server for logs, traces, and troubleshooting workflows",
   "bin": {
     "openobserve-mcp": "src/index.js"
@@ -22,6 +22,9 @@
   "files": [
     "src",
     "README.md",
+    "README.en.md",
+    "CONTRIBUTING.md",
+    "CONTRIBUTING.en.md",
     "LICENSE",
     ".env.example",
     "AI_USAGE.md",
