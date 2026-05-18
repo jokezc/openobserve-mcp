@@ -184,6 +184,101 @@ function buildSearchResultPayload(config, response) {
   };
 }
 
+function extractSearchHits(response) {
+  return Array.isArray(response?.hits) ? response.hits : [];
+}
+
+function buildLogSearchSql(streamName, input, limit) {
+  const clauses = [
+    input.keyword ? buildContainsClause(input.keywordField, input.keyword) : undefined,
+    ...buildEqualityClauses(input.filters),
+  ];
+  const whereClause = buildWhereClause(clauses);
+
+  return `SELECT * FROM ${quoteIdentifierForFrom(streamName)}${whereClause} ORDER BY _timestamp DESC LIMIT ${limit}`;
+}
+
+async function searchLogRows(client, config, input) {
+  const streamName = input.streamName ?? config.defaultLogStream;
+  if (!streamName) {
+    throw new Error("streamName is required unless OPENOBSERVE_DEFAULT_LOG_STREAM is configured");
+  }
+
+  const { startTime, endTime } = withTimeRange(config, input, {});
+  const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
+  const offset = input.offset ?? 0;
+  const sql = buildLogSearchSql(streamName, input, limit);
+  const response = await client.search({
+    sql,
+    streamType: "logs",
+    startTime,
+    endTime,
+    size: limit,
+    from: offset,
+  });
+
+  return {
+    streamName,
+    startTime,
+    endTime,
+    limit,
+    offset,
+    sql,
+    response,
+    rows: extractSearchHits(response),
+  };
+}
+
+function inferMessageFieldFromRows(rows) {
+  for (const row of rows) {
+    const field = inferMessageField(row);
+    if (field) {
+      return field;
+    }
+  }
+
+  return null;
+}
+
+function normalizePatternMessage(message) {
+  return String(message)
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "<UUID>")
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "<IP>")
+    .replace(/\b0x[0-9a-f]+\b/gi, "<HEX>")
+    .replace(/\b\d+\b/g, "<NUM>")
+    .replace(/"[^"]{0,100}"/g, '"<STR>"')
+    .trim();
+}
+
+function formatBucketStart(bucketStartMicros) {
+  return formatMicros(bucketStartMicros)?.slice(0, 16) ?? null;
+}
+
+function microsToSeconds(micros) {
+  return Math.floor(micros / 1_000_000);
+}
+
+function summarizeMetricSeries(response) {
+  const series = Array.isArray(response?.data?.result) ? response.data.result : [];
+  return {
+    status: response?.status ?? null,
+    resultType: response?.data?.resultType ?? null,
+    seriesCount: series.length,
+  };
+}
+
+function normalizeAlertList(response) {
+  if (Array.isArray(response?.list)) {
+    return response.list;
+  }
+
+  if (Array.isArray(response)) {
+    return response;
+  }
+
+  return [];
+}
+
 function paginateSearchValuesResult(response, offset, limit) {
   if (!response || typeof response !== "object") {
     return {
@@ -504,29 +599,7 @@ export function registerTools(server, client, config) {
       },
     },
     async (input) => {
-      const streamName = input.streamName ?? config.defaultLogStream;
-      if (!streamName) {
-        throw new Error("streamName is required unless OPENOBSERVE_DEFAULT_LOG_STREAM is configured");
-      }
-
-      const { startTime, endTime } = withTimeRange(config, input, {});
-      const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
-      const offset = input.offset ?? 0;
-      const clauses = [
-        input.keyword ? buildContainsClause(input.keywordField, input.keyword) : undefined,
-        ...buildEqualityClauses(input.filters),
-      ];
-      const whereClause = buildWhereClause(clauses);
-      const sql = `SELECT * FROM ${quoteIdentifierForFrom(streamName)}${whereClause} ORDER BY _timestamp DESC LIMIT ${limit}`;
-
-      const response = await client.search({
-        sql,
-        streamType: "logs",
-        startTime,
-        endTime,
-        size: limit,
-        from: offset,
-      });
+      const { streamName, startTime, endTime, limit, offset, sql, response } = await searchLogRows(client, config, input);
 
       return textResult("Log search results", {
         streamName,
@@ -534,6 +607,219 @@ export function registerTools(server, client, config) {
         range: client.describeRange(startTime, endTime),
         pagination: buildPagination(limit, offset, response?.total ?? null),
         ...buildSearchResultPayload(config, response),
+      });
+    },
+  );
+
+  server.registerTool(
+    "analyze_log_patterns",
+    {
+      title: "Analyze Log Patterns",
+      description: "Normalize log messages and rank the most frequent recurring patterns within a bounded time range.",
+      inputSchema: {
+        streamName: z.string().optional().describe("Log stream name. Defaults to OPENOBSERVE_DEFAULT_LOG_STREAM when set."),
+        keyword: z.string().optional().describe("Keyword to narrow the log set before pattern analysis."),
+        keywordField: z.string().optional().describe("Optional field name for keyword matching."),
+        filters: z.record(z.union([z.string(), z.number(), z.boolean()])).optional().describe("Optional equality filters, for example {\"service_name\":\"api\"}."),
+        messageField: z.string().optional().describe("Field used as the log message. When omitted, common message fields are inferred from the returned rows."),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
+        startTime: z.number().int().optional().describe("Start time in microseconds."),
+        endTime: z.number().int().optional().describe("End time in microseconds."),
+        limit: z.number().int().positive().optional().describe("Maximum rows to analyze."),
+        offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
+        top: z.number().int().positive().max(100).optional().describe("Maximum number of normalized patterns to return."),
+      },
+    },
+    async (input) => {
+      const { streamName, startTime, endTime, limit, offset, sql, response, rows } = await searchLogRows(client, config, input);
+      const summary = summarizeSearchResponse(response);
+      const messageField = input.messageField ?? inferMessageFieldFromRows(rows);
+      const top = Math.min(input.top ?? 20, 100);
+      const counts = new Map();
+      let analyzedRows = 0;
+      let skippedRows = 0;
+
+      for (const row of rows) {
+        const rawMessage = messageField ? row?.[messageField] : undefined;
+        if (rawMessage === undefined || rawMessage === null || rawMessage === "") {
+          skippedRows += 1;
+          continue;
+        }
+
+        const normalized = normalizePatternMessage(rawMessage);
+        if (!normalized) {
+          skippedRows += 1;
+          continue;
+        }
+
+        analyzedRows += 1;
+        counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+      }
+
+      const patterns = [...counts.entries()]
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, top)
+        .map(([pattern, count]) => ({
+          pattern,
+          count,
+          ratio: analyzedRows > 0 ? Number((count / analyzedRows).toFixed(4)) : 0,
+        }));
+
+      return textResult("Log pattern analysis", {
+        streamName,
+        sql,
+        range: client.describeRange(startTime, endTime),
+        pagination: buildPagination(limit, offset, response?.total ?? null),
+        warning: summary.summaryOnly
+          ? "The backend returned summary-only hits, so no raw log rows were available for pattern analysis."
+          : null,
+        analysis: {
+          messageField,
+          analyzedRows,
+          skippedRows,
+          uniquePatterns: counts.size,
+          top,
+          patterns,
+        },
+        sourceSummary: summary,
+      });
+    },
+  );
+
+  server.registerTool(
+    "analyze_log_topk",
+    {
+      title: "Analyze Log TopK",
+      description: "Group log rows by a field and return the most frequent values within a bounded time range.",
+      inputSchema: {
+        streamName: z.string().optional().describe("Log stream name. Defaults to OPENOBSERVE_DEFAULT_LOG_STREAM when set."),
+        keyword: z.string().optional().describe("Keyword to narrow the log set before aggregation."),
+        keywordField: z.string().optional().describe("Optional field name for keyword matching."),
+        filters: z.record(z.union([z.string(), z.number(), z.boolean()])).optional().describe("Optional equality filters, for example {\"service_name\":\"api\"}."),
+        field: z.string().describe("Field name to group by."),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
+        startTime: z.number().int().optional().describe("Start time in microseconds."),
+        endTime: z.number().int().optional().describe("End time in microseconds."),
+        limit: z.number().int().positive().optional().describe("Maximum rows to analyze."),
+        offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
+        top: z.number().int().positive().max(100).optional().describe("Maximum number of grouped values to return."),
+      },
+    },
+    async (input) => {
+      const { streamName, startTime, endTime, limit, offset, sql, response, rows } = await searchLogRows(client, config, input);
+      const summary = summarizeSearchResponse(response);
+      const top = Math.min(input.top ?? 20, 100);
+      const counts = new Map();
+      let missingCount = 0;
+
+      for (const row of rows) {
+        const value = row?.[input.field];
+        if (value === undefined || value === null || value === "") {
+          missingCount += 1;
+          continue;
+        }
+
+        const normalizedValue = typeof value === "string" ? value : JSON.stringify(value);
+        counts.set(normalizedValue, (counts.get(normalizedValue) ?? 0) + 1);
+      }
+
+      const groupedValues = [...counts.entries()]
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, top)
+        .map(([value, count]) => ({
+          value,
+          count,
+          ratio: rows.length > 0 ? Number((count / rows.length).toFixed(4)) : 0,
+        }));
+
+      return textResult("Log TopK analysis", {
+        streamName,
+        sql,
+        range: client.describeRange(startTime, endTime),
+        pagination: buildPagination(limit, offset, response?.total ?? null),
+        warning: summary.summaryOnly
+          ? "The backend returned summary-only hits, so no raw log rows were available for TopK analysis."
+          : null,
+        analysis: {
+          field: input.field,
+          analyzedRows: rows.length,
+          missingCount,
+          distinctValueCount: counts.size,
+          top,
+          values: groupedValues,
+        },
+        sourceSummary: summary,
+      });
+    },
+  );
+
+  server.registerTool(
+    "analyze_log_timeline",
+    {
+      title: "Analyze Log Timeline",
+      description: "Bucket log rows over time to reveal traffic spikes or bursty error windows within a bounded time range.",
+      inputSchema: {
+        streamName: z.string().optional().describe("Log stream name. Defaults to OPENOBSERVE_DEFAULT_LOG_STREAM when set."),
+        keyword: z.string().optional().describe("Keyword to narrow the log set before timeline analysis."),
+        keywordField: z.string().optional().describe("Optional field name for keyword matching."),
+        filters: z.record(z.union([z.string(), z.number(), z.boolean()])).optional().describe("Optional equality filters, for example {\"service_name\":\"api\"}."),
+        timestampField: z.string().optional().describe("Field used as the event timestamp. Defaults to _timestamp."),
+        bucketMinutes: z.number().int().positive().max(1440).optional().describe("Time bucket size in minutes."),
+        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
+        startTime: z.number().int().optional().describe("Start time in microseconds."),
+        endTime: z.number().int().optional().describe("End time in microseconds."),
+        limit: z.number().int().positive().optional().describe("Maximum rows to analyze."),
+        offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
+      },
+    },
+    async (input) => {
+      const { streamName, startTime, endTime, limit, offset, sql, response, rows } = await searchLogRows(client, config, input);
+      const summary = summarizeSearchResponse(response);
+      const timestampField = input.timestampField ?? "_timestamp";
+      const bucketMinutes = input.bucketMinutes ?? 5;
+      const bucketMicros = bucketMinutes * 60 * 1_000_000;
+      const counts = new Map();
+      let skippedRows = 0;
+
+      for (const row of rows) {
+        const rawTimestamp = row?.[timestampField];
+        const timestamp = Number(rawTimestamp);
+        if (!Number.isFinite(timestamp) || timestamp <= 0) {
+          skippedRows += 1;
+          continue;
+        }
+
+        const bucketStart = Math.floor(timestamp / bucketMicros) * bucketMicros;
+        counts.set(bucketStart, (counts.get(bucketStart) ?? 0) + 1);
+      }
+
+      const buckets = [...counts.entries()]
+        .sort((left, right) => left[0] - right[0])
+        .map(([bucketStart, count]) => ({
+          bucketStart,
+          bucketStartIso: formatBucketStart(bucketStart),
+          count,
+        }));
+      const peakBucket = buckets.reduce((peak, bucket) => (!peak || bucket.count > peak.count ? bucket : peak), null);
+
+      return textResult("Log timeline analysis", {
+        streamName,
+        sql,
+        range: client.describeRange(startTime, endTime),
+        pagination: buildPagination(limit, offset, response?.total ?? null),
+        warning: summary.summaryOnly
+          ? "The backend returned summary-only hits, so no raw log rows were available for timeline analysis."
+          : null,
+        analysis: {
+          timestampField,
+          bucketMinutes,
+          analyzedRows: rows.length - skippedRows,
+          skippedRows,
+          bucketCount: buckets.length,
+          peakBucket,
+          buckets,
+        },
+        sourceSummary: summary,
       });
     },
   );
@@ -639,6 +925,133 @@ export function registerTools(server, client, config) {
       return textResult("Streams", {
         pagination: buildPagination(limit, offset, response?.total ?? null),
         result: sanitize(config, response),
+      });
+    },
+  );
+
+  server.registerTool(
+    "query_metrics_instant",
+    {
+      title: "Query Metrics Instant",
+      description: "Run an instant PromQL query against OpenObserve's Prometheus-compatible metrics API.",
+      inputSchema: {
+        query: z.string().describe("PromQL expression to evaluate."),
+        lookback: z.string().optional().describe("Relative time range like 30m, 6h, or 1d. Used to derive the evaluation time when startTime/endTime are not supplied."),
+        startTime: z.number().int().optional().describe("Start time in microseconds. When endTime is omitted, the query evaluates at this time."),
+        endTime: z.number().int().optional().describe("End time in microseconds. When supplied, the query evaluates at this time."),
+      },
+    },
+    async (input) => {
+      const { startTime, endTime } = withTimeRange(config, input, { defaultLookback: "15m" });
+      const evaluationTime = endTime ?? startTime;
+      const response = await client.queryMetricsInstant({
+        query: input.query,
+        time: microsToSeconds(evaluationTime),
+      });
+
+      return textResult("Metrics instant query", {
+        query: input.query,
+        evaluationTimeMicros: evaluationTime,
+        evaluationTimeIso: formatMicros(evaluationTime),
+        summary: summarizeMetricSeries(response),
+        result: sanitize(config, response),
+      });
+    },
+  );
+
+  server.registerTool(
+    "query_metrics_range",
+    {
+      title: "Query Metrics Range",
+      description: "Run a range PromQL query over a bounded time window using OpenObserve's Prometheus-compatible metrics API.",
+      inputSchema: {
+        query: z.string().describe("PromQL expression to evaluate."),
+        step: z.number().positive().optional().describe("Range query step in seconds. Defaults to 60."),
+        lookback: z.string().optional().describe("Relative time range like 30m, 6h, or 1d12h."),
+        startTime: z.number().int().optional().describe("Start time in microseconds."),
+        endTime: z.number().int().optional().describe("End time in microseconds."),
+      },
+    },
+    async (input) => {
+      const { startTime, endTime } = withTimeRange(config, input, { defaultLookback: "1h" });
+      const response = await client.queryMetricsRange({
+        query: input.query,
+        start: microsToSeconds(startTime),
+        end: microsToSeconds(endTime),
+        step: input.step ?? 60,
+      });
+
+      return textResult("Metrics range query", {
+        query: input.query,
+        stepSeconds: input.step ?? 60,
+        range: client.describeRange(startTime, endTime),
+        summary: summarizeMetricSeries(response),
+        result: sanitize(config, response),
+      });
+    },
+  );
+
+  server.registerTool(
+    "list_metric_names",
+    {
+      title: "List Metric Names",
+      description: "List metric names visible in a bounded time range from OpenObserve's Prometheus-compatible metrics API.",
+      inputSchema: {
+        match: z.string().optional().describe("Optional Prometheus match[] style selector to narrow metric discovery."),
+        keyword: z.string().optional().describe("Optional substring filter applied to returned metric names."),
+        lookback: z.string().optional().describe("Relative time range like 30m, 6h, or 1d."),
+        startTime: z.number().int().optional().describe("Start time in microseconds."),
+        endTime: z.number().int().optional().describe("End time in microseconds."),
+        limit: z.number().int().positive().optional().describe("Maximum metric names to return."),
+        offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
+      },
+    },
+    async (input) => {
+      const { startTime, endTime } = withTimeRange(config, input, { defaultLookback: "1h" });
+      const limit = clamp(input.limit ?? config.defaultStreamRows, config.maxStreamRows);
+      const offset = input.offset ?? 0;
+      const response = await client.listMetricNames({
+        start: microsToSeconds(startTime),
+        end: microsToSeconds(endTime),
+        match: input.match,
+      });
+      const names = Array.isArray(response?.data) ? response.data : [];
+      const filteredNames = input.keyword
+        ? names.filter((name) => String(name).toLowerCase().includes(input.keyword.toLowerCase()))
+        : names;
+      const pagedNames = filteredNames.slice(offset, offset + limit);
+
+      return textResult("Metric names", {
+        range: client.describeRange(startTime, endTime),
+        match: input.match ?? null,
+        keyword: input.keyword ?? null,
+        pagination: buildPagination(limit, offset, filteredNames.length),
+        summary: {
+          discovered: names.length,
+          afterKeywordFilter: filteredNames.length,
+          returned: pagedNames.length,
+        },
+        names: pagedNames,
+      });
+    },
+  );
+
+  server.registerTool(
+    "list_alerts",
+    {
+      title: "List Alerts",
+      description: "List alert definitions configured in the current OpenObserve organization.",
+      inputSchema: {},
+    },
+    async () => {
+      const response = await client.listAlerts();
+      const alerts = normalizeAlertList(response);
+
+      return textResult("Alerts", {
+        summary: {
+          count: alerts.length,
+        },
+        alerts: sanitize(config, alerts),
       });
     },
   );

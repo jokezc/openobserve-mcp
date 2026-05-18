@@ -13,6 +13,8 @@
 - 在受控时间范围内检索日志
 - 先枚举字段候选值，再收敛过滤条件
 - 聚合高频错误模式
+- 查询指标当前值和时间趋势
+- 查看当前组织里的告警规则
 - 发现慢请求并分析 Trace DAG
 - 从 Trace 自动回捞相关日志
 - 对常见敏感字段做递归脱敏
@@ -92,6 +94,12 @@ npm install
 cp .env.example .env
 ```
 
+PowerShell 也可以直接执行：
+
+```powershell
+Copy-Item .env.example .env
+```
+
 3. 填写 `.env`
 
 ```env
@@ -108,6 +116,18 @@ npm start
 ```
 
 启动后，进程会通过 `stdio` 等待 MCP Client 连接。
+
+5. 运行测试
+
+```bash
+npm test
+```
+
+6. 有真实 OpenObserve 实例时执行联调冒烟
+
+```bash
+npm run smoke:live
+```
 
 ## 配置说明
 
@@ -134,6 +154,11 @@ npm start
 | `OPENOBSERVE_MAX_STREAM_ROWS` | `500` | Stream 列表类工具允许返回的最大行数，填 `0` 表示不限制 |
 | `OPENOBSERVE_MASK_FIELDS` | 内置字段列表 | 需要递归脱敏的字段名，逗号分隔 |
 
+如果你准备跑 `npm run smoke:live`，建议额外配置：
+
+- `OPENOBSERVE_DEFAULT_LOG_STREAM`
+- `OPENOBSERVE_DEFAULT_TRACE_STREAM`
+
 默认查询行为：
 
 - 所有查询类工具默认使用 `OPENOBSERVE_DEFAULT_LOOKBACK`，默认值是 `3d`
@@ -154,9 +179,22 @@ npm start
 ### 日志排查
 
 - `search_logs`
+- `analyze_log_patterns`
+- `analyze_log_topk`
+- `analyze_log_timeline`
 - `search_sql`
 - `top_errors`
 - `get_log_context`
+
+### Metrics 分析
+
+- `list_metric_names`
+- `query_metrics_instant`
+- `query_metrics_range`
+
+### Alerts 查看
+
+- `list_alerts`
 
 ### Trace 分析
 
@@ -188,6 +226,17 @@ npm start
 
 适合请求 ID、订单号、Trace ID、服务名、已知报错关键字这类定点排查场景。
 
+### 当你需要从一批日志里直接提炼结论时
+
+建议顺序：
+
+1. `search_logs`
+2. `analyze_log_patterns`
+3. `analyze_log_topk`
+4. `analyze_log_timeline`
+
+适合“最近错误主要分成哪几类”“哪个服务最频繁”“异常集中在哪个时间段”这类分析型问题。
+
 ### 当问题是慢请求或 Trace 分析时
 
 建议顺序：
@@ -199,12 +248,30 @@ npm start
 
 这个路径会先找到异常 Trace，再逐步收敛到具体日志证据。
 
+### 当你需要看指标当前值或趋势时
+
+建议顺序：
+
+1. 指标名不明确时先用 `list_metric_names`
+2. 查当前值用 `query_metrics_instant`
+3. 看趋势用 `query_metrics_range`
+
+适合 CPU、内存、QPS、延迟、错误率这类指标问题。
+
+### 当你需要确认告警覆盖或规则定义时
+
+建议顺序：
+
+1. `list_alerts`
+
+适合先确认某个 Stream、服务或场景是否已经有对应告警规则。
+
 ## Tool 说明
 
 分页约定：
 
-- `search_sql`、`search_logs`、`search_values`、`top_errors`、`list_streams`、`find_slow_requests`、`correlate_logs_and_traces` 支持 `limit` + `offset`
-- `get_stream_settings`、`get_stream_schema`、`get_log_context`、`get_trace_summary`、`get_trace_detail` 属于详情型工具，不提供分页
+- `search_sql`、`search_logs`、`search_values`、`top_errors`、`list_streams`、`find_slow_requests`、`correlate_logs_and_traces`、`list_metric_names` 支持 `limit` + `offset`
+- `get_stream_settings`、`get_stream_schema`、`get_log_context`、`get_trace_summary`、`get_trace_detail`、`query_metrics_instant`、`query_metrics_range`、`list_alerts` 属于详情型工具，不提供分页
 - `search_values` 会优先使用接口返回结果做分页适配；如果后端不提供原生分页，则在返回结果上做切片并给出提示
 
 ### `list_streams`
@@ -255,10 +322,81 @@ npm start
 - 做更灵活的聚合、过滤、排序和分页
 - 作为通用查询能力的补充入口
 
+### `analyze_log_patterns`
+
+适合：
+
+- 从最近一批日志中提取高频消息模式
+- 对包含请求 ID、IP、数字等动态内容的日志做归一化聚类
+- 快速回答“最近最常见的是哪几类报错”
+
+### `analyze_log_topk`
+
+适合：
+
+- 统计 `service_name`、`level`、`status_code`、`namespace` 等字段的 TopK
+- 快速发现最活跃服务或最集中的错误维度
+- 在原始日志较多时先做字段分布收敛
+
+### `analyze_log_timeline`
+
+适合：
+
+- 查看一批日志在时间上的分布情况
+- 识别错误突增、高峰时间段和突发窗口
+- 为后续缩小时间范围或对齐 Trace 异常提供依据
+
+### `list_metric_names`
+
+适合：
+
+- 不确定指标名时先做发现
+- 先按关键字筛选候选 metric name
+- 给后续 PromQL 查询提供更稳的起点
+
+### `query_metrics_instant`
+
+适合：
+
+- 查看某个 PromQL 表达式当前值
+- 快速确认某个指标当前是否异常
+- 做单时刻的容量、QPS、错误率判断
+
+### `query_metrics_range`
+
+适合：
+
+- 查看最近一段时间的指标趋势
+- 对比峰值、波动和异常突增
+- 配合 logs/traces 对齐故障发生窗口
+
+### `list_alerts`
+
+适合：
+
+- 查看当前组织里已配置的告警规则
+- 确认某个 Stream 或场景是否已有告警覆盖
+- 在排障时补充规则背景和触发条件线索
+
 说明：
 
 - 只允许 `SELECT`
 - 更适合高级查询，不建议作为默认第一步
+
+## 开发与发布
+
+常用命令：
+
+- `npm test`
+- `npm run smoke:live`
+- `npm run release:check`
+
+推荐发布前顺序：
+
+1. `npm test`
+2. 配好真实实例环境变量后执行 `npm run smoke:live`
+3. 执行 `npm run release:check`
+4. 确认 `README`、`.env.example`、`CHANGELOG.md` 已同步
 
 ### `top_errors`
 
@@ -332,6 +470,18 @@ npm start
 npm start
 ```
 
+运行测试：
+
+```bash
+npm test
+```
+
+执行真实实例冒烟检查：
+
+```bash
+npm run smoke:live
+```
+
 监听模式：
 
 ```bash
@@ -349,6 +499,13 @@ npm run dev
 - `src/sanitize.js`：递归脱敏逻辑
 
 ## 发布
+
+推荐发布前顺序：
+
+1. `npm test`
+2. `npm run smoke:live`
+3. `npm run release:check`
+4. 确认 `README`、`.env.example`、`CHANGELOG.md` 已同步
 
 当前包采用公开 scoped package 方式发布：
 

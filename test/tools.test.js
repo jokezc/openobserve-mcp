@@ -1,0 +1,172 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { registerTools } from "../src/tools.js";
+
+function createHarness(overrides = {}) {
+  const tools = new Map();
+  const server = {
+    registerTool(name, schema, handler) {
+      tools.set(name, { schema, handler });
+    },
+  };
+
+  const client = {
+    search: async () => ({ total: 0, hits: [] }),
+    describeRange: (startTime, endTime) => `${startTime}->${endTime}`,
+    listMetricNames: async () => ({ data: [] }),
+    queryMetricsInstant: async () => ({ status: "success", data: { resultType: "vector", result: [] } }),
+    queryMetricsRange: async () => ({ status: "success", data: { resultType: "matrix", result: [] } }),
+    listAlerts: async () => ({ list: [] }),
+    listStreams: async () => ({ list: [] }),
+    getStreamDetails: async () => ({}),
+    getStreamSchema: async () => ({ schema: [] }),
+    searchValues: async () => ({}),
+    searchAround: async () => ({}),
+    getLatestTraces: async () => ({ hits: [] }),
+    getTraceDag: async () => ({ nodes: [], edges: [] }),
+    findTraceById: async () => ({}),
+    ...overrides.client,
+  };
+
+  const config = {
+    defaultLogStream: "app_logs",
+    defaultTraceStream: "default",
+    defaultLookback: "1h",
+    defaultLogRows: 50,
+    defaultStreamRows: 20,
+    maxRangeMicros: 7 * 24 * 60 * 60 * 1_000_000,
+    maxRangeLabel: "7d",
+    maxLogRows: 500,
+    maxStreamRows: 200,
+    maskFields: ["password", "token"],
+    ...overrides.config,
+  };
+
+  registerTools(server, client, config);
+  return { tools, client, config };
+}
+
+test("analyze_log_patterns normalizes dynamic message fragments", async () => {
+  const { tools } = createHarness({
+    client: {
+      search: async () => ({
+        total: 3,
+        hits: [
+          { _timestamp: 1, log: 'timeout for request_id="abc-123" status=500 ip=10.0.0.1' },
+          { _timestamp: 2, log: 'timeout for request_id="def-456" status=502 ip=10.0.0.2' },
+          { _timestamp: 3, log: "database unavailable" },
+        ],
+      }),
+    },
+  });
+
+  const result = await tools.get("analyze_log_patterns").handler({
+    streamName: "app_logs",
+    lookback: "30m",
+    top: 5,
+  });
+
+  assert.equal(result.structuredContent.analysis.analyzedRows, 3);
+  assert.equal(result.structuredContent.analysis.uniquePatterns, 2);
+  assert.equal(result.structuredContent.analysis.patterns[0].count, 2);
+  assert.match(result.structuredContent.analysis.patterns[0].pattern, /timeout/);
+  assert.doesNotMatch(result.structuredContent.analysis.patterns[0].pattern, /10\.0\.0\./);
+  assert.doesNotMatch(result.structuredContent.analysis.patterns[0].pattern, /500|502/);
+});
+
+test("analyze_log_topk groups by the requested field", async () => {
+  const { tools } = createHarness({
+    client: {
+      search: async () => ({
+        total: 4,
+        hits: [
+          { _timestamp: 1, service_name: "api" },
+          { _timestamp: 2, service_name: "api" },
+          { _timestamp: 3, service_name: "worker" },
+          { _timestamp: 4 },
+        ],
+      }),
+    },
+  });
+
+  const result = await tools.get("analyze_log_topk").handler({
+    field: "service_name",
+    lookback: "30m",
+  });
+
+  assert.equal(result.structuredContent.analysis.distinctValueCount, 2);
+  assert.equal(result.structuredContent.analysis.missingCount, 1);
+  assert.deepEqual(result.structuredContent.analysis.values[0], {
+    value: "api",
+    count: 2,
+    ratio: 0.5,
+  });
+});
+
+test("list_metric_names filters and paginates returned metric names", async () => {
+  const { tools } = createHarness({
+    client: {
+      listMetricNames: async () => ({
+        data: ["process_cpu_seconds_total", "http_requests_total", "http_request_duration_seconds"],
+      }),
+    },
+  });
+
+  const result = await tools.get("list_metric_names").handler({
+    lookback: "1h",
+    keyword: "http",
+    limit: 1,
+    offset: 1,
+  });
+
+  assert.equal(result.structuredContent.summary.discovered, 3);
+  assert.equal(result.structuredContent.summary.afterKeywordFilter, 2);
+  assert.deepEqual(result.structuredContent.names, ["http_request_duration_seconds"]);
+  assert.equal(result.structuredContent.pagination.nextOffset, null);
+});
+
+test("query_metrics_instant summarizes vector results", async () => {
+  const { tools } = createHarness({
+    client: {
+      queryMetricsInstant: async ({ query, time }) => ({
+        status: "success",
+        echo: { query, time },
+        data: {
+          resultType: "vector",
+          result: [
+            { metric: { service: "api" }, value: [time, "12"] },
+            { metric: { service: "worker" }, value: [time, "3"] },
+          ],
+        },
+      }),
+    },
+  });
+
+  const result = await tools.get("query_metrics_instant").handler({
+    query: "sum(rate(http_requests_total[5m]))",
+    lookback: "15m",
+  });
+
+  assert.equal(result.structuredContent.summary.seriesCount, 2);
+  assert.equal(result.structuredContent.summary.resultType, "vector");
+  assert.equal(result.structuredContent.result.status, "success");
+});
+
+test("list_alerts normalizes alert list payloads", async () => {
+  const { tools } = createHarness({
+    client: {
+      listAlerts: async () => ({
+        list: [
+          { name: "High Error Rate", stream_name: "app_logs", enabled: true },
+          { name: "Latency Spike", stream_name: "traces", enabled: false },
+        ],
+      }),
+    },
+  });
+
+  const result = await tools.get("list_alerts").handler({});
+
+  assert.equal(result.structuredContent.summary.count, 2);
+  assert.equal(result.structuredContent.alerts[0].name, "High Error Rate");
+  assert.equal(result.structuredContent.alerts[1].enabled, false);
+});

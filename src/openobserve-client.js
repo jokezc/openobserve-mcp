@@ -206,6 +206,40 @@ export class OpenObserveClient {
     );
   }
 
+  async queryMetricsInstant({ query, time }) {
+    return this.request(`/api/${this.config.orgId}/prometheus/api/v1/query`, {
+      query: {
+        query,
+        time,
+      },
+    });
+  }
+
+  async queryMetricsRange({ query, start, end, step }) {
+    return this.request(`/api/${this.config.orgId}/prometheus/api/v1/query_range`, {
+      query: {
+        query,
+        start,
+        end,
+        step,
+      },
+    });
+  }
+
+  async listMetricNames({ start, end, match }) {
+    return this.request(`/api/${this.config.orgId}/prometheus/api/v1/label/__name__/values`, {
+      query: {
+        start,
+        end,
+        match,
+      },
+    });
+  }
+
+  async listAlerts() {
+    return this.request(`/api/${this.config.orgId}/alerts`);
+  }
+
   describeRange(startTime, endTime) {
     return `${formatMicros(startTime)} -> ${formatMicros(endTime)}`;
   }

@@ -13,6 +13,8 @@ This project packages common OpenObserve workflows for log search, field discove
 - Search logs within bounded time ranges
 - Discover candidate field values before filtering
 - Aggregate frequent error patterns
+- Query current metric values and time-series trends
+- Inspect alert definitions in the current organization
 - Find slow requests and inspect trace DAGs
 - Correlate traces back to related logs
 - Recursively mask common sensitive fields
@@ -93,6 +95,12 @@ npm install
 cp .env.example .env
 ```
 
+In PowerShell you can also run:
+
+```powershell
+Copy-Item .env.example .env
+```
+
 3. Fill in `.env`
 
 ```env
@@ -109,6 +117,18 @@ npm start
 ```
 
 The process will then wait for an MCP client connection over `stdio`.
+
+5. Run tests
+
+```bash
+npm test
+```
+
+6. Run a live smoke check when you have a real OpenObserve instance
+
+```bash
+npm run smoke:live
+```
 
 ## Configuration
 
@@ -135,6 +155,11 @@ The process will then wait for an MCP client connection over `stdio`.
 | `OPENOBSERVE_MAX_STREAM_ROWS` | `500` | Maximum rows returned by stream listing tools. Use `0` for unlimited |
 | `OPENOBSERVE_MASK_FIELDS` | built-in field list | Comma-separated field names to mask recursively |
 
+If you plan to run `npm run smoke:live`, it is helpful to also configure:
+
+- `OPENOBSERVE_DEFAULT_LOG_STREAM`
+- `OPENOBSERVE_DEFAULT_TRACE_STREAM`
+
 Default query behavior:
 
 - All query-oriented tools use `OPENOBSERVE_DEFAULT_LOOKBACK`, which defaults to `3d`
@@ -155,9 +180,22 @@ Default query behavior:
 ### Log Investigation
 
 - `search_logs`
+- `analyze_log_patterns`
+- `analyze_log_topk`
+- `analyze_log_timeline`
 - `search_sql`
 - `top_errors`
 - `get_log_context`
+
+### Metrics Analysis
+
+- `list_metric_names`
+- `query_metrics_instant`
+- `query_metrics_range`
+
+### Alert Inspection
+
+- `list_alerts`
 
 ### Trace Analysis
 
@@ -189,6 +227,17 @@ Recommended order:
 
 This is the fastest path for request IDs, order IDs, trace IDs, service names, or known error keywords.
 
+### When you need conclusions from a batch of logs
+
+Recommended order:
+
+1. `search_logs`
+2. `analyze_log_patterns`
+3. `analyze_log_topk`
+4. `analyze_log_timeline`
+
+This flow is useful for questions like "what are the main error families", "which service appears most often", or "when did the spike happen".
+
 ### When the issue is about latency or tracing
 
 Recommended order:
@@ -200,12 +249,30 @@ Recommended order:
 
 This flow starts from suspicious traces and narrows down to concrete log evidence.
 
+### When you need current metric values or trends
+
+Recommended order:
+
+1. Use `list_metric_names` first if the metric name is unclear
+2. Use `query_metrics_instant` for current values
+3. Use `query_metrics_range` for recent trends
+
+This flow is useful for CPU, memory, QPS, latency, or error-rate questions.
+
+### When you need alert coverage or rule context
+
+Recommended order:
+
+1. `list_alerts`
+
+This is useful for checking whether a stream, service, or failure mode already has alert coverage.
+
 ## Tool Details
 
 Pagination conventions:
 
-- `search_sql`, `search_logs`, `search_values`, `top_errors`, `list_streams`, `find_slow_requests`, and `correlate_logs_and_traces` support `limit` + `offset`
-- `get_stream_settings`, `get_stream_schema`, `get_log_context`, `get_trace_summary`, and `get_trace_detail` are detail-oriented tools and do not expose pagination
+- `search_sql`, `search_logs`, `search_values`, `top_errors`, `list_streams`, `find_slow_requests`, `correlate_logs_and_traces`, and `list_metric_names` support `limit` + `offset`
+- `get_stream_settings`, `get_stream_schema`, `get_log_context`, `get_trace_summary`, `get_trace_detail`, `query_metrics_instant`, `query_metrics_range`, and `list_alerts` are detail-oriented tools and do not expose pagination
 - `search_values` uses the endpoint's returned shape when possible; if the backend does not expose native pagination, the server slices the returned values and reports that behavior explicitly
 
 ### `list_streams`
@@ -255,6 +322,62 @@ Best for:
 - running read-only SQL when the generic tools are not enough
 - handling more flexible aggregation, filtering, sorting, and pagination
 - acting as a fallback query tool when the generic tools are not enough
+
+### `analyze_log_patterns`
+
+Best for:
+
+- extracting recurring message patterns from a recent log sample
+- clustering messages that contain dynamic values like request IDs, IPs, or numbers
+- quickly answering "what are the dominant error shapes right now"
+
+### `analyze_log_topk`
+
+Best for:
+
+- ranking fields such as `service_name`, `level`, `status_code`, or `namespace`
+- spotting the busiest service or most concentrated failure dimension
+- narrowing an investigation with a field distribution before reading raw rows
+
+### `analyze_log_timeline`
+
+Best for:
+
+- understanding how a log set is distributed over time
+- identifying spikes, bursts, and abnormal windows
+- narrowing the next investigation step to a smaller time range
+
+### `list_metric_names`
+
+Best for:
+
+- discovering candidate metric names before writing PromQL
+- narrowing metrics by keyword or selector
+- giving later PromQL queries a safer starting point
+
+### `query_metrics_instant`
+
+Best for:
+
+- checking the current value of a PromQL expression
+- validating whether a metric is abnormal right now
+- making quick decisions about capacity, QPS, or error rate
+
+### `query_metrics_range`
+
+Best for:
+
+- inspecting recent metric trends over time
+- comparing peaks, fluctuations, and spikes
+- aligning a metric anomaly window with logs or traces
+
+### `list_alerts`
+
+Best for:
+
+- viewing the alert definitions configured in the current organization
+- checking whether a stream or scenario already has alert coverage
+- adding alert-rule context to an investigation
 
 Notes:
 
@@ -333,6 +456,18 @@ Run normally:
 npm start
 ```
 
+Run tests:
+
+```bash
+npm test
+```
+
+Run the live smoke check:
+
+```bash
+npm run smoke:live
+```
+
 Run in watch mode:
 
 ```bash
@@ -350,6 +485,13 @@ Current source layout:
 - `src/sanitize.js`: recursive masking logic
 
 ## Publishing
+
+Recommended pre-release order:
+
+1. `npm test`
+2. `npm run smoke:live`
+3. `npm run release:check`
+4. Confirm that `README`, `.env.example`, and `CHANGELOG.md` are up to date
 
 The package is configured for public scoped publishing:
 
