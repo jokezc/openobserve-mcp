@@ -146,11 +146,13 @@ npm run smoke:live
 | Variable | Default | Description |
 | --- | --- | --- |
 | `OPENOBSERVE_DEFAULT_LOG_STREAM` | empty | Default log stream used by log-oriented tools |
-| `OPENOBSERVE_DEFAULT_TRACE_STREAM` | empty | Default trace stream used by trace-oriented tools |
+| `OPENOBSERVE_DEFAULT_TRACE_STREAM` | `default` | Default trace stream used by trace-oriented tools |
+| `OPENOBSERVE_DEFAULT_LOG_COLUMNS` | `_timestamp,message` | Comma-separated default columns used by `search_logs` and log-correlation tools |
 | `OPENOBSERVE_DEFAULT_LOOKBACK` | `3d` | Default time window for query-oriented tools. Supports values like `7d`, `12h`, `30m`, and `1d12h` |
-| `OPENOBSERVE_DEFAULT_LOG_ROWS` | `200` | Default row count used by log-oriented query tools |
+| `OPENOBSERVE_DEFAULT_LOG_ROWS` | `50` | Default row count used by log-oriented query tools |
 | `OPENOBSERVE_DEFAULT_STREAM_ROWS` | `100` | Default row count used by stream listing tools |
-| `OPENOBSERVE_MAX_RANGE` | `30d` | Maximum allowed query time range. Supports `7d`, `12h`, `30m`, `1d12h`; use `0` for unlimited |
+| `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT` | `1000` | Default truncation length for the log `message` field. Use `0` for unlimited |
+| `OPENOBSERVE_MAX_RANGE` | `31d` | Maximum allowed query span. Supports `7d`, `12h`, `30m`, `1d12h`; use `0` for unlimited. This limits the distance between start and end, not how far back in history the range begins |
 | `OPENOBSERVE_MAX_LOG_ROWS` | `1000` | Maximum rows returned by log-oriented tools. Use `0` for unlimited |
 | `OPENOBSERVE_MAX_STREAM_ROWS` | `500` | Maximum rows returned by stream listing tools. Use `0` for unlimited |
 | `OPENOBSERVE_MASK_FIELDS` | built-in field list | Comma-separated field names to mask recursively |
@@ -163,8 +165,12 @@ If you plan to run `npm run smoke:live`, it is helpful to also configure:
 Default query behavior:
 
 - All query-oriented tools use `OPENOBSERVE_DEFAULT_LOOKBACK`, which defaults to `3d`
-- Log-oriented tools use `OPENOBSERVE_DEFAULT_LOG_ROWS`, which defaults to `200`
+- Log-oriented tools use `OPENOBSERVE_DEFAULT_LOG_ROWS`, which defaults to `50`
 - Stream listing tools use `OPENOBSERVE_DEFAULT_STREAM_ROWS`, which defaults to `100`
+- `OPENOBSERVE_DEFAULT_LOG_STREAM` is empty by default, so the server will not guess a log stream name for you
+- `OPENOBSERVE_DEFAULT_TRACE_STREAM` defaults to `default`
+- `search_logs` uses `OPENOBSERVE_DEFAULT_LOG_COLUMNS` by default, which defaults to `_timestamp,message`
+- Log body handling defaults to the `message` field, and truncation is controlled by `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT`, which defaults to `1000`; use `0` for unlimited
 - Query tools consistently support `lookback` values like `30m`, `6h`, `7d`, and `1d12h`
 - All queries are still constrained by `OPENOBSERVE_MAX_RANGE`, `OPENOBSERVE_MAX_LOG_ROWS`, and `OPENOBSERVE_MAX_STREAM_ROWS`
 
@@ -211,21 +217,23 @@ Default query behavior:
 Recommended order:
 
 1. `list_streams`
-2. `get_stream_settings`
-3. `get_stream_schema`
-4. `search_values`
+2. Choose the most likely `1` to `3` candidate streams from the returned list
+3. `search_logs`
+4. Use `get_stream_settings` and `get_stream_schema` only if field uncertainty still blocks the next query
+5. Use `search_values` only when field names are known but candidate values are still unclear
 
-This helps the model understand the available streams, field layout, and candidate values before guessing filters.
+Prefer candidate streams that best match the user's environment, project, node, request path, and naming similarity. Start with the smallest likely set before expanding to more streams.
 
 ### When you already have a concrete clue
 
 Recommended order:
 
-1. `search_logs`
-2. `get_log_context`
-3. `search_sql` only if the generic tools are not enough
+1. If the stream is known, use `search_logs` directly
+2. If the stream is unknown, use `list_streams` first and then run `search_logs` against the most likely `1` to `3` candidate streams
+3. `get_log_context`
+4. `search_sql` only if the generic tools are not enough
 
-This is the fastest path for request IDs, order IDs, trace IDs, service names, or known error keywords.
+This is the fastest path for request IDs, order IDs, trace IDs, service names, node names, request paths, or known error keywords. Prefer high-specificity clues such as short unique IDs, exact paths, and precise timestamps over generic exception terms.
 
 ### When you need conclusions from a batch of logs
 

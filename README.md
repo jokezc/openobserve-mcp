@@ -145,11 +145,13 @@ npm run smoke:live
 | 变量名 | 默认值 | 说明 |
 | --- | --- | --- |
 | `OPENOBSERVE_DEFAULT_LOG_STREAM` | 空 | 日志类工具默认使用的日志流 |
-| `OPENOBSERVE_DEFAULT_TRACE_STREAM` | 空 | Trace 类工具默认使用的 Trace 流 |
+| `OPENOBSERVE_DEFAULT_TRACE_STREAM` | `default` | Trace 类工具默认使用的 Trace 流 |
+| `OPENOBSERVE_DEFAULT_LOG_COLUMNS` | `_timestamp,message` | `search_logs` 与日志关联类工具默认查询的列，逗号分隔 |
 | `OPENOBSERVE_DEFAULT_LOOKBACK` | `3d` | 查询类工具默认时间窗口，支持 `7d`、`12h`、`30m`、`1d12h` |
-| `OPENOBSERVE_DEFAULT_LOG_ROWS` | `200` | 日志类查询工具默认返回条数 |
+| `OPENOBSERVE_DEFAULT_LOG_ROWS` | `50` | 日志类查询工具默认返回条数 |
 | `OPENOBSERVE_DEFAULT_STREAM_ROWS` | `100` | Stream 列表类工具默认返回条数 |
-| `OPENOBSERVE_MAX_RANGE` | `30d` | 单次允许查询的最大时间范围，支持 `7d`、`12h`、`30m`、`1d12h`，填 `0` 表示不限制 |
+| `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT` | `1000` | 日志 `message` 字段的默认截断长度，填 `0` 表示不截断 |
+| `OPENOBSERVE_MAX_RANGE` | `31d` | 单次允许查询的最大时间跨度，支持 `7d`、`12h`、`30m`、`1d12h`，填 `0` 表示不限制。它限制的是 start/end 之间的跨度，不限制你查多久以前的数据 |
 | `OPENOBSERVE_MAX_LOG_ROWS` | `1000` | 日志类工具允许返回的最大行数，填 `0` 表示不限制 |
 | `OPENOBSERVE_MAX_STREAM_ROWS` | `500` | Stream 列表类工具允许返回的最大行数，填 `0` 表示不限制 |
 | `OPENOBSERVE_MASK_FIELDS` | 内置字段列表 | 需要递归脱敏的字段名，逗号分隔 |
@@ -162,8 +164,12 @@ npm run smoke:live
 默认查询行为：
 
 - 所有查询类工具默认使用 `OPENOBSERVE_DEFAULT_LOOKBACK`，默认值是 `3d`
-- 日志类工具默认返回条数使用 `OPENOBSERVE_DEFAULT_LOG_ROWS`，默认值是 `200`
+- 日志类工具默认返回条数使用 `OPENOBSERVE_DEFAULT_LOG_ROWS`，默认值是 `50`
 - Stream 列表类工具默认返回条数使用 `OPENOBSERVE_DEFAULT_STREAM_ROWS`，默认值是 `100`
+- `OPENOBSERVE_DEFAULT_LOG_STREAM` 默认为空，不会自动猜测日志 stream；未配置时需要在调用时显式传入
+- `OPENOBSERVE_DEFAULT_TRACE_STREAM` 默认值是 `default`
+- `search_logs` 默认查询列来自 `OPENOBSERVE_DEFAULT_LOG_COLUMNS`，默认值是 `_timestamp,message`
+- 日志正文默认按 `message` 字段处理，截断长度来自 `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT`，默认 `1000`，填 `0` 表示不截断
 - 查询工具统一支持 `lookback`，格式如 `30m`、`6h`、`7d`、`1d12h`
 - 所有查询仍然会受 `OPENOBSERVE_MAX_RANGE`、`OPENOBSERVE_MAX_LOG_ROWS`、`OPENOBSERVE_MAX_STREAM_ROWS` 限制
 
@@ -210,21 +216,23 @@ npm run smoke:live
 建议顺序：
 
 1. `list_streams`
-2. `get_stream_settings`
-3. `get_stream_schema`
-4. `search_values`
+2. 从返回结果里优先选择最可能的 `1` 到 `3` 个候选 Stream
+3. `search_logs`
+4. 如果字段信息仍然不清楚，再用 `get_stream_settings`、`get_stream_schema`
+5. 如果字段名已知但可选值不清楚，再用 `search_values`
 
-这样可以先确认可用 Stream、字段结构和可过滤值，避免一开始就猜字段名。
+优先根据环境、项目、节点、请求路径和命名相似度来选候选 Stream。先查最可能的小范围候选，再决定是否扩展，避免一开始就猜 Stream 名或扫很多不相关的 Stream。
 
 ### 当你已经有明确线索时
 
 建议顺序：
 
-1. `search_logs`
-2. `get_log_context`
-3. 通用工具不够时再用 `search_sql`
+1. 如果 Stream 已知，直接 `search_logs`
+2. 如果 Stream 未知，先 `list_streams`，再选最可能的 `1` 到 `3` 个候选 Stream 做 `search_logs`
+3. `get_log_context`
+4. 通用工具不够时再用 `search_sql`
 
-适合请求 ID、订单号、Trace ID、服务名、已知报错关键字这类定点排查场景。
+适合请求 ID、订单号、Trace ID、服务名、节点名、已知报错关键字这类定点排查场景。短唯一 ID、请求路径、精确时间这类高特异性线索要优先于通用异常名。
 
 ### 当你需要从一批日志里直接提炼结论时
 
