@@ -306,6 +306,14 @@ npm run smoke:live
 - 识别 `trace_id`、`span_id`、`service_name`、日志消息字段等关键字段
 - 排查字段名到底是什么，避免 AI 瞎猜
 
+### `get_stream_fields`
+
+适合：
+
+- 想直接看某个 Stream 有哪些字段名可用
+- 在使用 `filters`、`keywordField`、`search_values` 前先确认字段是否真实存在
+- 作为 `get_stream_schema` 的直白别名入口
+
 ### `search_values`
 
 适合：
@@ -321,6 +329,14 @@ npm run smoke:live
 - 根据关键字、服务名、请求 ID、订单号、Trace ID 等直接查日志
 - 在较小时间窗口里快速拉出原始证据
 - 作为大多数定点排查场景的第一入口
+
+补充说明：
+
+- `lookback` 适合“最近 15 分钟 / 1 小时”这类相对时间
+- 如果你已经知道精确时间窗口，优先使用 `start` / `end` 传可读时间字符串，例如 `2026-05-19 10:09:14`
+- `startTime` / `endTime` 微秒时间戳继续支持，但更适合作为底层兼容参数
+- 不带时区的时间字符串按本地时区解析；如果你需要显式时区，可以传 `2026-05-19T10:09:14Z` 或 `2026-05-19T10:09:14+08:00`
+- 如果过滤字段报不存在，先用 `get_stream_schema` 或 `get_stream_fields` 确认字段名
 
 ### `search_sql`
 

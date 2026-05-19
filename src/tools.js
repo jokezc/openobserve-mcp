@@ -33,6 +33,8 @@ function sanitize(config, value) {
 
 function withTimeRange(config, input, defaults) {
   return resolveTimeRange({
+    start: input.start,
+    end: input.end,
     startTime: input.startTime,
     endTime: input.endTime,
     lookback: input.lookback,
@@ -169,6 +171,22 @@ function buildPagination(limit, offset = 0, total = null) {
     total: effectiveTotal,
     nextOffset,
   };
+}
+
+function buildFieldHelpMessage(streamName, streamType = "logs") {
+  const target = streamName ? ` for stream "${streamName}"` : "";
+  return `The requested field may not exist${target}. Use get_stream_schema or get_stream_fields first to inspect the available ${streamType} fields, then retry with a valid field name.`;
+}
+
+function withFieldGuidance(error, streamName, streamType = "logs") {
+  const message = error instanceof Error ? error.message : String(error);
+  const lowered = message.toLowerCase();
+
+  if (lowered.includes("field not found") || lowered.includes("search field not found") || lowered.includes("unknown field")) {
+    throw new Error(`${message} ${buildFieldHelpMessage(streamName, streamType)}`);
+  }
+
+  throw error;
 }
 
 function truncateLogMessage(text, maxChars) {
@@ -582,6 +600,32 @@ export function registerTools(server, client, config) {
   );
 
   server.registerTool(
+    "get_stream_fields",
+    {
+      title: "Get Stream Fields",
+      description: "Fetch the available fields for a stream. This is a more direct alias for get_stream_schema when you mainly need to see which field names exist before using filters, keywordField, or correlation fields.",
+      inputSchema: {
+        streamName: z.string().describe("Stream name."),
+        streamType: z.enum(["logs", "metrics", "traces"]).optional(),
+      },
+    },
+    async (input) => {
+      const response = await client.getStreamSchema({
+        streamName: input.streamName,
+        streamType: input.streamType ?? "logs",
+      });
+      const rows = normalizeSchemaRows(response);
+
+      return textResult("Stream fields", {
+        streamName: input.streamName,
+        streamType: input.streamType ?? "logs",
+        summary: summarizeSchemaFields(rows),
+        fields: sanitize(config, response),
+      });
+    },
+  );
+
+  server.registerTool(
     "search_values",
     {
       title: "Search Values",
@@ -591,8 +635,10 @@ export function registerTools(server, client, config) {
         fields: z.array(z.string()).min(1).max(10).describe("Field names to inspect."),
         keyword: z.string().optional().describe("Optional prefix/keyword filter supported by OpenObserve."),
         lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
-        startTime: z.number().int().optional(),
-        endTime: z.number().int().optional(),
+        start: z.string().optional().describe("Optional start datetime string such as 2026-05-19 10:09:14."),
+        end: z.string().optional().describe("Optional end datetime string such as 2026-05-19 10:19:14."),
+        startTime: z.number().int().optional().describe("Optional start time in microseconds. Prefer start when possible."),
+        endTime: z.number().int().optional().describe("Optional end time in microseconds. Prefer end when possible."),
         limit: z.number().int().positive().optional().describe("Maximum values per field to return."),
         offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
         noCount: z.boolean().optional().describe("When true, skip count calculation if supported by the backend."),
@@ -607,15 +653,20 @@ export function registerTools(server, client, config) {
       const { startTime, endTime } = withTimeRange(config, input, {});
       const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
       const offset = input.offset ?? 0;
-      const response = await client.searchValues({
-        streamName,
-        fields: input.fields,
-        startTime,
-        endTime,
-        size: offset + limit,
-        keyword: input.keyword ?? "",
-        noCount: input.noCount ?? false,
-      });
+      let response;
+      try {
+        response = await client.searchValues({
+          streamName,
+          fields: input.fields,
+          startTime,
+          endTime,
+          size: offset + limit,
+          keyword: input.keyword ?? "",
+          noCount: input.noCount ?? false,
+        });
+      } catch (error) {
+        withFieldGuidance(error, streamName, "logs");
+      }
       const pagedResult = paginateSearchValuesResult(response, offset, limit);
 
       return textResult("Field values", {
@@ -641,14 +692,22 @@ export function registerTools(server, client, config) {
         keywordField: z.string().optional().describe("Optional field name for keyword matching."),
         filters: z.record(z.union([z.string(), z.number(), z.boolean()])).optional().describe("Optional equality filters, for example {\"service_name\":\"api\"}."),
         lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
-        startTime: z.number().int().optional().describe("Start time in microseconds."),
-        endTime: z.number().int().optional().describe("End time in microseconds."),
+        start: z.string().optional().describe("Optional start datetime string such as 2026-05-19 10:09:14."),
+        end: z.string().optional().describe("Optional end datetime string such as 2026-05-19 10:19:14."),
+        startTime: z.number().int().optional().describe("Optional start time in microseconds. Prefer start when possible."),
+        endTime: z.number().int().optional().describe("Optional end time in microseconds. Prefer end when possible."),
         limit: z.number().int().positive().optional().describe("Maximum rows to return."),
         offset: z.number().int().min(0).optional().describe("Result offset for pagination."),
       },
     },
     async (input) => {
-      const { streamName, startTime, endTime, limit, offset, sql, response } = await searchLogRows(client, config, input);
+      let result;
+      try {
+        result = await searchLogRows(client, config, input);
+      } catch (error) {
+        withFieldGuidance(error, input.streamName ?? config.defaultLogStream, "logs");
+      }
+      const { streamName, startTime, endTime, limit, offset, sql, response } = result;
 
       return textResult("Log search results", {
         streamName,

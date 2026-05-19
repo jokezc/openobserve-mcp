@@ -307,6 +307,14 @@ Best for:
 - identifying fields such as `trace_id`, `span_id`, `service_name`, and the main message field
 - avoiding guesswork when field names are unclear
 
+### `get_stream_fields`
+
+Best for:
+
+- directly checking which field names exist in a stream
+- validating filter fields before using `filters`, `keywordField`, or `search_values`
+- serving as a more explicit alias for `get_stream_schema`
+
 ### `search_values`
 
 Best for:
@@ -322,6 +330,14 @@ Best for:
 - finding logs by keyword, service name, request ID, order ID, trace ID, or other structured clues
 - pulling a small evidence set from a bounded time window
 - serving as the first step for most targeted investigations
+
+Additional notes:
+
+- use `lookback` for relative windows such as "last 15 minutes" or "last hour"
+- use `start` and `end` with readable datetime strings such as `2026-05-19 10:09:14` when you already know the exact time window
+- `startTime` and `endTime` microsecond timestamps are still supported, but they are better treated as low-level compatibility parameters
+- datetime strings without an explicit timezone are interpreted in the local timezone; use values like `2026-05-19T10:09:14Z` or `2026-05-19T10:09:14+08:00` when you need an explicit timezone
+- if a filter field is reported as missing, use `get_stream_schema` or `get_stream_fields` first to verify the actual field names
 
 ### `search_sql`
 

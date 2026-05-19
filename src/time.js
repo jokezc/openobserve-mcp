@@ -38,7 +38,31 @@ export function parseDurationToMicros(value, label = "duration") {
   return total;
 }
 
+export function parseDateTimeToMicros(value, label = "time") {
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be a datetime string like 2026-05-19 10:09:14`);
+  }
+
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error(`${label} must not be empty`);
+  }
+
+  const isoLike = normalized.includes("T")
+    ? normalized
+    : normalized.replace(" ", "T");
+  const millis = Date.parse(isoLike);
+
+  if (Number.isNaN(millis)) {
+    throw new Error(`${label} must look like 2026-05-19 10:09:14 or 2026-05-19T10:09:14Z`);
+  }
+
+  return millis * 1_000;
+}
+
 export function resolveTimeRange({
+  start,
+  end,
   startTime,
   endTime,
   lookback,
@@ -47,9 +71,11 @@ export function resolveTimeRange({
   maxRangeLabel,
 }) {
   const now = nowMicros();
-  const effectiveEnd = endTime ?? now;
+  const parsedStart = start ? parseDateTimeToMicros(start, "start") : undefined;
+  const parsedEnd = end ? parseDateTimeToMicros(end, "end") : undefined;
+  const effectiveEnd = endTime ?? parsedEnd ?? now;
   const fallbackLookback = lookback ?? defaultLookback;
-  const effectiveStart = startTime ?? (effectiveEnd - parseDurationToMicros(fallbackLookback, "lookback"));
+  const effectiveStart = startTime ?? parsedStart ?? (effectiveEnd - parseDurationToMicros(fallbackLookback, "lookback"));
 
   if (effectiveStart >= effectiveEnd) {
     throw new Error("startTime must be smaller than endTime");

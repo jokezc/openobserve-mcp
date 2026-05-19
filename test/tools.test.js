@@ -314,3 +314,87 @@ test("search_logs does not truncate message when char limit is zero", async () =
   assert.equal(result.structuredContent.result.hits[0].message, longMessage);
   assert.equal(result.structuredContent.truncation.messageCharLimit, 0);
 });
+
+test("search_logs adds schema guidance when a filter field is missing", async () => {
+  const { tools } = createHarness({
+    client: {
+      search: async () => {
+        throw new Error("Search field not found: node_name");
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => tools.get("search_logs").handler({
+      streamName: "prod_management",
+      filters: { node_name: "management-2" },
+      lookback: "15m",
+    }),
+    /Use get_stream_schema or get_stream_fields first to inspect the available logs fields/,
+  );
+});
+
+test("search_values adds schema guidance when a field is missing", async () => {
+  const { tools } = createHarness({
+    client: {
+      searchValues: async () => {
+        throw new Error("Search field not found: node_name");
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => tools.get("search_values").handler({
+      streamName: "prod_management",
+      fields: ["node_name"],
+      lookback: "15m",
+    }),
+    /Use get_stream_schema or get_stream_fields first to inspect the available logs fields/,
+  );
+});
+
+test("get_stream_fields exposes a direct alias for schema discovery", async () => {
+  const { tools } = createHarness({
+    client: {
+      getStreamSchema: async () => ({
+        schema: [
+          { name: "_timestamp", type: "Utf8" },
+          { name: "message", type: "Utf8" },
+        ],
+      }),
+    },
+  });
+
+  const result = await tools.get("get_stream_fields").handler({
+    streamName: "prod_management",
+  });
+
+  assert.equal(result.structuredContent.streamName, "prod_management");
+  assert.equal(result.structuredContent.summary.fieldCount, 2);
+  assert.equal(result.structuredContent.fields.schema[0].name, "_timestamp");
+});
+
+test("search_logs accepts readable start and end datetime strings", async () => {
+  let capturedRange = null;
+  const { tools } = createHarness({
+    client: {
+      search: async ({ startTime, endTime }) => {
+        capturedRange = { startTime, endTime };
+        return {
+          total: 0,
+          hits: [],
+        };
+      },
+    },
+  });
+
+  await tools.get("search_logs").handler({
+    streamName: "prod_management",
+    start: "2026-05-19 10:09:14",
+    end: "2026-05-19 10:19:14",
+    keyword: "k4szB4jM",
+  });
+
+  assert.equal(capturedRange.startTime, 1779156554000000);
+  assert.equal(capturedRange.endTime, 1779157154000000);
+});
