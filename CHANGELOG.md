@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 - 2026-05-19
+
+- Simplified schema guidance to prefer `get_stream_schema` as the single field-discovery path instead of maintaining a separate `get_stream_fields` alias.
+- Consolidated trace inspection by removing `get_trace_detail` and adding optional `includeTraceDag` support to `get_trace_summary`.
+- Updated server guidance and documentation to steer AI clients toward the new trace-summary flow and broader error-analysis tool set.
+- Added regression coverage for `top_errors` aggregation and optional trace DAG inclusion in `get_trace_summary`.
+
 ## 0.3.1 - 2026-05-19
 
 - Refined troubleshooting guidance to prefer `list_streams` when the correct log stream is unknown, instead of guessing stream names.

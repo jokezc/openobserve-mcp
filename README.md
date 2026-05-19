@@ -203,7 +203,6 @@ npm run smoke:live
 
 - `find_slow_requests`
 - `get_trace_summary`
-- `get_trace_detail`
 - `correlate_logs_and_traces`
 
 ## 推荐排障路径
@@ -248,10 +247,9 @@ npm run smoke:live
 
 1. `find_slow_requests`
 2. `get_trace_summary`
-3. `get_trace_detail`
-4. `correlate_logs_and_traces`
+3. `correlate_logs_and_traces`
 
-这个路径会先找到异常 Trace，再逐步收敛到具体日志证据。
+这个路径会先找到异常 Trace，再逐步收敛到具体日志证据。需要完整 DAG 时，在 `get_trace_summary` 里传 `includeTraceDag=true`。
 
 ### 当你需要看指标当前值或趋势时
 
@@ -276,196 +274,126 @@ npm run smoke:live
 分页约定：
 
 - `search_sql`、`search_logs`、`search_values`、`top_errors`、`list_streams`、`find_slow_requests`、`correlate_logs_and_traces`、`list_metric_names` 支持 `limit` + `offset`
-- `get_stream_settings`、`get_stream_schema`、`get_log_context`、`get_trace_summary`、`get_trace_detail`、`query_metrics_instant`、`query_metrics_range`、`list_alerts` 属于详情型工具，不提供分页
+- `get_stream_settings`、`get_stream_schema`、`get_log_context`、`get_trace_summary`、`query_metrics_instant`、`query_metrics_range`、`list_alerts` 属于详情型工具，不提供分页
 - `search_values` 会优先使用接口返回结果做分页适配；如果后端不提供原生分页，则在返回结果上做切片并给出提示
 
-### `list_streams`
+### 基础探索类
 
-适合：
+#### `list_streams`
 
-- 先查看当前组织里有哪些日志流、指标流、Trace 流
-- 不确定排查入口时，快速确认应该查哪个 Stream
-- 想先按关键字筛选出候选 Stream
+- 作用：列出当前组织里的 logs / metrics / traces streams，解决“先查哪个 stream”
+- 适合：找候选日志流、按关键字筛 stream、排查前确认数据入口
+- 边界：不解决字段结构，也不返回具体日志内容
 
-### `get_stream_settings`
+#### `get_stream_settings`
 
-适合：
+- 作用：查看单个 stream 的统计信息、索引信息、全文检索设置和查询相关配置
+- 适合：判断哪些字段更适合过滤、全文检索或 distinct values
+- 边界：它偏 stream 级配置；`get_stream_schema` 才偏字段结构
 
-- 查看单个 Stream 的统计信息和查询相关设置
-- 识别哪些字段适合做过滤、全文检索、distinct values
-- 在正式检索前先了解这个 Stream 的查询特征
+#### `get_stream_schema`
 
-### `get_stream_schema`
+- 作用：查看某个 stream 的字段列表、类型和字段摘要
+- 适合：不确定字段名时确认 schema，识别 `trace_id`、`span_id`、`service_name`、消息字段等关键字段
+- 边界：它解决“字段叫什么”；字段值探索用 `search_values`
 
-适合：
+#### `search_values`
 
-- 查看某个日志流或 Trace 流有哪些字段
-- 识别 `trace_id`、`span_id`、`service_name`、日志消息字段等关键字段
-- 排查字段名到底是什么，避免 AI 瞎猜
+- 作用：查看已知字段在最近时间范围里出现过哪些值
+- 适合：字段名已知但值不清楚，先枚举 `service_name`、`level`、`namespace`、`status_code` 等候选值
+- 边界：它解决“字段值有哪些”；高特异性线索仍应直接用 `search_logs`
 
-### `get_stream_fields`
+### 日志排查类
 
-适合：
+#### `search_logs`
 
-- 想直接看某个 Stream 有哪些字段名可用
-- 在使用 `filters`、`keywordField`、`search_values` 前先确认字段是否真实存在
-- 作为 `get_stream_schema` 的直白别名入口
+- 作用：在有明确线索时直接检索原始日志，是大多数定点排查场景的第一入口
+- 适合：按关键字、服务名、请求 ID、订单号、traceId、节点名等直接查证据
+- 时间建议：优先小窗口；已知精确时间时优先用 `start` / `end`
+- 边界：它是“原始证据检索”，不负责模式归类、TopK 统计或时间聚合
 
-### `search_values`
+#### `get_log_context`
 
-适合：
+- 作用：围绕某条已知日志的 `_timestamp` 拉前后上下文
+- 适合：已找到代表性日志，想看它前后发生了什么，或还原局部请求过程
+- 边界：它依赖已知时间点，一般在 `search_logs` 之后使用
 
-- 先枚举 `service_name`、`level`、`status_code` 等字段最近有哪些值
-- 不知道具体过滤条件时，先摸清候选值
-- 给后续 `search_logs` 或 `search_sql` 提供更稳的筛选依据
+#### `top_errors`
 
-### `search_logs`
+- 作用：聚合最近时间窗口里最常见的错误消息
+- 适合：快速回答“最近主要错误有哪些”，先做 broad scan 再决定下一步下钻
+- 边界：它是固定视角的快捷错误聚合；更灵活的字段分析用 `analyze_log_topk`，message 模式归类用 `analyze_log_patterns`
 
-适合：
+#### `analyze_log_patterns`
 
-- 根据关键字、服务名、请求 ID、订单号、Trace ID 等直接查日志
-- 在较小时间窗口里快速拉出原始证据
-- 作为大多数定点排查场景的第一入口
+- 作用：对一批日志消息做归一化和聚类，输出高频模式
+- 适合：看“最近最常见的是哪几类报错”，尤其适合 message 中带动态值的日志
+- 边界：它偏 message 模式归类，不是字段 TopK，也不是原始日志检索
 
-补充说明：
+#### `analyze_log_topk`
 
-- `lookback` 适合“最近 15 分钟 / 1 小时”这类相对时间
-- 如果你已经知道精确时间窗口，优先使用 `start` / `end` 传可读时间字符串，例如 `2026-05-19 10:09:14`
-- `startTime` / `endTime` 微秒时间戳继续支持，但更适合作为底层兼容参数
-- 不带时区的时间字符串按本地时区解析；如果你需要显式时区，可以传 `2026-05-19T10:09:14Z` 或 `2026-05-19T10:09:14+08:00`
-- 如果过滤字段报不存在，先用 `get_stream_schema` 或 `get_stream_fields` 确认字段名
+- 作用：按指定字段统计最常见的值
+- 适合：看哪个服务最多、哪个状态码最多、哪个 namespace 最多，快速做字段分布收敛
+- 边界：它偏字段频次统计，不是 message 模式聚类，也不是时间分布分析
 
-### `search_sql`
+#### `analyze_log_timeline`
 
-适合：
+- 作用：把一批日志按时间分桶，查看分布和高峰
+- 适合：看异常是否集中爆发，判断高峰时间段和突发窗口
+- 边界：它偏时间分布，不是 message 模式归类，也不是字段 TopK
 
-- 通用工具不够用时执行只读 SQL
-- 做更灵活的聚合、过滤、排序和分页
-- 作为通用查询能力的补充入口
+#### `search_sql`
 
-### `analyze_log_patterns`
+- 作用：在通用工具不够用时执行只读 SQL
+- 适合：更灵活的聚合、过滤、排序、分页，或通用工具表达不了的查询
+- 约束：只允许 `SELECT`；更适合高级查询，不建议作为默认第一步
 
-适合：
+### Metrics 分析类
 
-- 从最近一批日志中提取高频消息模式
-- 对包含请求 ID、IP、数字等动态内容的日志做归一化聚类
-- 快速回答“最近最常见的是哪几类报错”
+#### `list_metric_names`
 
-### `analyze_log_topk`
+- 作用：发现当前时间范围里可见的 metric names
+- 适合：不确定指标名时先做发现，再给后续 PromQL 提供稳定起点
 
-适合：
+#### `query_metrics_instant`
 
-- 统计 `service_name`、`level`、`status_code`、`namespace` 等字段的 TopK
-- 快速发现最活跃服务或最集中的错误维度
-- 在原始日志较多时先做字段分布收敛
+- 作用：查询某个 PromQL 表达式在某个时间点的值
+- 适合：看当前值，快速判断当前是否异常
 
-### `analyze_log_timeline`
+#### `query_metrics_range`
 
-适合：
+- 作用：查询某个 PromQL 表达式在一段时间内的趋势
+- 适合：看趋势、波动、峰值、突增，并和 logs / traces 对齐故障时间窗口
+- 边界：`query_metrics_instant` 看单点；`query_metrics_range` 看时间序列
 
-- 查看一批日志在时间上的分布情况
-- 识别错误突增、高峰时间段和突发窗口
-- 为后续缩小时间范围或对齐 Trace 异常提供依据
+### Alerts 查看类
 
-### `list_metric_names`
+#### `list_alerts`
 
-适合：
+- 作用：查看当前组织里已经配置的告警规则
+- 适合：确认某个 stream、服务或场景是否已有告警覆盖，并补充规则背景和触发条件
 
-- 不确定指标名时先做发现
-- 先按关键字筛选候选 metric name
-- 给后续 PromQL 查询提供更稳的起点
+### Trace 分析类
 
-### `query_metrics_instant`
+#### `find_slow_requests`
 
-适合：
+- 作用：查最近一段时间最慢的 traces
+- 适合：用户反馈“请求慢了”“延迟升高”时，先找最可疑的 trace
+- 边界：它解决“先找异常 trace”，不是直接看某个已知 traceId 的详情
 
-- 查看某个 PromQL 表达式当前值
-- 快速确认某个指标当前是否异常
-- 做单时刻的容量、QPS、错误率判断
+#### `get_trace_summary`
 
-### `query_metrics_range`
+- 作用：根据 `traceId` 查看一条 trace 的摘要
+- 适合：快速理解 trace 涉及哪些服务、多少 spans、根操作是什么；需要完整 DAG 时传 `includeTraceDag=true`
+- 边界：默认是摘要入口，不需要单独的 `get_trace_detail`
 
-适合：
+#### `correlate_logs_and_traces`
 
-- 查看最近一段时间的指标趋势
-- 对比峰值、波动和异常突增
-- 配合 logs/traces 对齐故障发生窗口
-
-### `list_alerts`
-
-适合：
-
-- 查看当前组织里已配置的告警规则
-- 确认某个 Stream 或场景是否已有告警覆盖
-- 在排障时补充规则背景和触发条件线索
-
-说明：
-
-- 只允许 `SELECT`
-- 更适合高级查询，不建议作为默认第一步
+- 作用：已知 `traceId` 后，自动回捞相关日志并结合 trace 信息一起看
+- 适合：从 trace 收敛到具体日志证据，沿着 `trace_id`、`span_id`、`service_name` 三类线索一起找证据
+- 边界：`get_trace_summary` 主要看 trace 自身；这个 tool 主要做 trace 和日志的桥接
 
 ## 开发与发布
-
-常用命令：
-
-- `npm test`
-- `npm run smoke:live`
-- `npm run release:check`
-
-推荐发布前顺序：
-
-1. `npm test`
-2. 配好真实实例环境变量后执行 `npm run smoke:live`
-3. 执行 `npm run release:check`
-4. 确认 `README`、`.env.example`、`CHANGELOG.md` 已同步
-
-### `top_errors`
-
-适合：
-
-- 在较大时间窗口里统计最常见错误
-- 先做 broad scan，再挑一类错误继续下钻
-- 判断当前主要异常模式集中在哪些服务或报错文本
-
-### `get_log_context`
-
-适合：
-
-- 已知某条日志 `_timestamp` 后，向前向后拉上下文
-- 判断单条报错前后发生了什么
-- 从代表性日志还原一次完整请求的局部过程
-
-### `find_slow_requests`
-
-适合：
-
-- 查最近一段时间最慢的 Trace
-- 当用户反馈“请求慢了”“延迟升高”时作为第一入口
-- 先识别最可疑的 Trace，再继续做摘要和细查
-
-### `get_trace_summary`
-
-适合：
-
-- 根据 `traceId` 快速理解一条 Trace 的整体结构
-- 汇总服务数、Span 数、根操作和主要受影响服务
-- 在正式查看完整 DAG 前先做快速判断
-
-### `get_trace_detail`
-
-适合：
-
-- 在 `get_trace_summary` 之后继续下钻
-- 需要完整 DAG 节点和边时直接获取详细 Trace 数据
-- 让 AI 自己做更细粒度的 Trace 判断
-
-### `correlate_logs_and_traces`
-
-适合：
-
-- 已知 `traceId` 后自动回捞相关日志
-- 沿着 `trace_id`、`span_id`、`service_name` 三类线索一起找证据
-- 从慢 Trace 或异常 Trace 快速收敛到具体报错日志
 
 ## 设计原则
 

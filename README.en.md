@@ -205,7 +205,6 @@ Default query behavior:
 
 - `find_slow_requests`
 - `get_trace_summary`
-- `get_trace_detail`
 - `correlate_logs_and_traces`
 
 ## Recommended Investigation Flows
@@ -250,10 +249,9 @@ Recommended order:
 
 1. `find_slow_requests`
 2. `get_trace_summary`
-3. `get_trace_detail`
-4. `correlate_logs_and_traces`
+3. `correlate_logs_and_traces`
 
-This flow starts from suspicious traces and narrows down to concrete log evidence.
+This flow starts from suspicious traces and narrows down to concrete log evidence. When the full DAG is needed, set `includeTraceDag=true` on `get_trace_summary`.
 
 ### When you need current metric values or trends
 
@@ -278,181 +276,124 @@ This is useful for checking whether a stream, service, or failure mode already h
 Pagination conventions:
 
 - `search_sql`, `search_logs`, `search_values`, `top_errors`, `list_streams`, `find_slow_requests`, `correlate_logs_and_traces`, and `list_metric_names` support `limit` + `offset`
-- `get_stream_settings`, `get_stream_schema`, `get_log_context`, `get_trace_summary`, `get_trace_detail`, `query_metrics_instant`, `query_metrics_range`, and `list_alerts` are detail-oriented tools and do not expose pagination
+- `get_stream_settings`, `get_stream_schema`, `get_log_context`, `get_trace_summary`, `query_metrics_instant`, `query_metrics_range`, and `list_alerts` are detail-oriented tools and do not expose pagination
 - `search_values` uses the endpoint's returned shape when possible; if the backend does not expose native pagination, the server slices the returned values and reports that behavior explicitly
 
-### `list_streams`
+### Discovery Tools
 
-Best for:
+#### `list_streams`
 
-- seeing which log, metric, and trace streams exist in the current organization
-- identifying the right stream before starting an investigation
-- filtering candidate streams by keyword
+- What it does: lists the available log, metric, and trace streams and answers "which stream should I inspect first?"
+- Best for: finding candidate log streams, filtering by keyword, and confirming the investigation entry point
+- Boundary: it does not explain field structure or return actual log evidence
 
-### `get_stream_settings`
+#### `get_stream_settings`
 
-Best for:
+- What it does: returns stream-level stats, indexing hints, full-text-search settings, and query-relevant metadata
+- Best for: understanding which fields are good filter candidates or indexing/search candidates
+- Boundary: it is stream-configuration oriented; `get_stream_schema` is field-structure oriented
 
-- inspecting stream-level stats and query-related settings
-- understanding which fields are suitable for filtering, full-text search, or distinct-value exploration
-- learning a stream's query characteristics before searching it
+#### `get_stream_schema`
 
-### `get_stream_schema`
+- What it does: returns the fields, types, and schema summary for a stream
+- Best for: verifying field names before filtering and locating key fields such as `trace_id`, `span_id`, `service_name`, and the main message field
+- Boundary: it answers "which fields exist?"; `search_values` answers "which values exist?"
 
-Best for:
+#### `search_values`
 
-- checking which fields exist in a log or trace stream
-- identifying fields such as `trace_id`, `span_id`, `service_name`, and the main message field
-- avoiding guesswork when field names are unclear
+- What it does: shows recent values for one or more known fields
+- Best for: discovering candidate values for fields like `service_name`, `level`, `namespace`, or `status_code`
+- Boundary: for direct evidence lookup by ID, trace ID, request ID, or exact keyword, use `search_logs`
 
-### `get_stream_fields`
+### Log Investigation Tools
 
-Best for:
+#### `search_logs`
 
-- directly checking which field names exist in a stream
-- validating filter fields before using `filters`, `keywordField`, or `search_values`
-- serving as a more explicit alias for `get_stream_schema`
+- What it does: searches raw logs using keywords, fields, and bounded time ranges
+- Best for: direct evidence lookup by request ID, order ID, trace ID, service name, node, path, or error text
+- Time hint: prefer short windows first; use `start` / `end` when you already know the exact time range
+- Boundary: it is raw evidence lookup, not pattern analysis, TopK analysis, or timeline analysis
 
-### `search_values`
+#### `get_log_context`
 
-Best for:
+- What it does: fetches surrounding log lines around a known `_timestamp`
+- Best for: understanding what happened immediately before and after a representative log event
+- Boundary: you typically use it after `search_logs`, not instead of `search_logs`
 
-- listing recent values for fields like `service_name`, `level`, or `status_code`
-- exploring candidate filter values before you know the exact condition
-- giving later `search_logs` or `search_sql` queries a safer starting point
+#### `top_errors`
 
-### `search_logs`
+- What it does: aggregates the most frequent recent error messages
+- Best for: answering "what are the main errors recently" and doing a fast broad error scan
+- Boundary: it is a fixed shortcut aggregation; `analyze_log_patterns` is message-pattern-oriented and `analyze_log_topk` is field-oriented
 
-Best for:
+#### `analyze_log_patterns`
 
-- finding logs by keyword, service name, request ID, order ID, trace ID, or other structured clues
-- pulling a small evidence set from a bounded time window
-- serving as the first step for most targeted investigations
+- What it does: normalizes log messages and groups recurring message patterns
+- Best for: identifying the main error shapes in a recent log slice, especially when messages contain dynamic values
+- Boundary: it is message-pattern-oriented, not field-oriented and not raw-evidence lookup
 
-Additional notes:
+#### `analyze_log_topk`
 
-- use `lookback` for relative windows such as "last 15 minutes" or "last hour"
-- use `start` and `end` with readable datetime strings such as `2026-05-19 10:09:14` when you already know the exact time window
-- `startTime` and `endTime` microsecond timestamps are still supported, but they are better treated as low-level compatibility parameters
-- datetime strings without an explicit timezone are interpreted in the local timezone; use values like `2026-05-19T10:09:14Z` or `2026-05-19T10:09:14+08:00` when you need an explicit timezone
-- if a filter field is reported as missing, use `get_stream_schema` or `get_stream_fields` first to verify the actual field names
+- What it does: ranks the most frequent values of a chosen field
+- Best for: seeing which service, namespace, level, or status code dominates a log slice
+- Boundary: it is field-distribution-oriented, not message-pattern-oriented or time-distribution-oriented
 
-### `search_sql`
+#### `analyze_log_timeline`
 
-Best for:
+- What it does: buckets a log slice over time to show spikes and burst windows
+- Best for: identifying when an anomaly concentrated and aligning a log spike with a trace or metric event window
+- Boundary: it is time-distribution-oriented, not field-distribution-oriented or message-clustering-oriented
 
-- running read-only SQL when the generic tools are not enough
-- handling more flexible aggregation, filtering, sorting, and pagination
-- acting as a fallback query tool when the generic tools are not enough
+#### `search_sql`
 
-### `analyze_log_patterns`
+- What it does: runs bounded read-only SQL when the generic tools are not enough
+- Best for: custom aggregations, filters, sorting, and pagination that do not fit the higher-level tools cleanly
+- Constraint: only `SELECT` is allowed, and it is best treated as an advanced fallback
 
-Best for:
+### Metrics Tools
 
-- extracting recurring message patterns from a recent log sample
-- clustering messages that contain dynamic values like request IDs, IPs, or numbers
-- quickly answering "what are the dominant error shapes right now"
+#### `list_metric_names`
 
-### `analyze_log_topk`
+- What it does: discovers metric names visible in a recent time window
+- Best for: finding candidate metric names before writing PromQL
 
-Best for:
+#### `query_metrics_instant`
 
-- ranking fields such as `service_name`, `level`, `status_code`, or `namespace`
-- spotting the busiest service or most concentrated failure dimension
-- narrowing an investigation with a field distribution before reading raw rows
+- What it does: evaluates a PromQL expression at one point in time
+- Best for: checking current values and validating whether a metric is abnormal right now
 
-### `analyze_log_timeline`
+#### `query_metrics_range`
 
-Best for:
+- What it does: evaluates a PromQL expression over a time range
+- Best for: reviewing trends, spikes, fluctuations, and peaks, and aligning a metric anomaly with logs or traces
+- Boundary: `query_metrics_instant` is for a single evaluation point; this one is for a time series
 
-- understanding how a log set is distributed over time
-- identifying spikes, bursts, and abnormal windows
-- narrowing the next investigation step to a smaller time range
+### Alert Inspection Tools
 
-### `list_metric_names`
+#### `list_alerts`
 
-Best for:
+- What it does: lists the alert definitions configured in the current organization
+- Best for: checking whether a stream, service, or scenario already has alert coverage
 
-- discovering candidate metric names before writing PromQL
-- narrowing metrics by keyword or selector
-- giving later PromQL queries a safer starting point
+### Trace Tools
 
-### `query_metrics_instant`
+#### `find_slow_requests`
 
-Best for:
+- What it does: finds the slowest traces in a recent time range
+- Best for: user reports about slowness, latency, or timeouts
+- Boundary: it finds suspicious traces first; `get_trace_summary` inspects a known trace ID
 
-- checking the current value of a PromQL expression
-- validating whether a metric is abnormal right now
-- making quick decisions about capacity, QPS, or error rate
+#### `get_trace_summary`
 
-### `query_metrics_range`
+- What it does: summarizes one trace by `traceId` and can optionally include the full DAG with `includeTraceDag=true`
+- Best for: first-pass trace understanding, including service count, span count, root operations, and impacted services
+- Boundary: there is no separate `get_trace_detail` anymore; use `includeTraceDag=true` when you need full DAG detail
 
-Best for:
+#### `correlate_logs_and_traces`
 
-- inspecting recent metric trends over time
-- comparing peaks, fluctuations, and spikes
-- aligning a metric anomaly window with logs or traces
-
-### `list_alerts`
-
-Best for:
-
-- viewing the alert definitions configured in the current organization
-- checking whether a stream or scenario already has alert coverage
-- adding alert-rule context to an investigation
-
-Notes:
-
-- only `SELECT` is allowed
-- it is better as an advanced fallback than as the default first step
-
-### `top_errors`
-
-Best for:
-
-- aggregating the most frequent errors over a broader time window
-- doing a broad scan before drilling into one error family
-- identifying which services or message patterns dominate current failures
-
-### `get_log_context`
-
-Best for:
-
-- fetching surrounding log lines around a known `_timestamp`
-- understanding what happened immediately before and after a representative event
-- reconstructing a local request story from one important log line
-
-### `find_slow_requests`
-
-Best for:
-
-- finding the slowest traces in a recent time range
-- serving as the first step when users report latency or slow requests
-- identifying suspicious traces before deeper trace inspection
-
-### `get_trace_summary`
-
-Best for:
-
-- quickly understanding the overall shape of a trace from a `traceId`
-- summarizing service count, span count, root operations, and impacted services
-- making a fast first-pass judgement before loading the full DAG
-
-### `get_trace_detail`
-
-Best for:
-
-- drilling down after `get_trace_summary`
-- fetching the full DAG nodes and edges for detailed trace analysis
-- allowing the AI client to perform more fine-grained trace reasoning
-
-### `correlate_logs_and_traces`
-
-Best for:
-
-- pulling related logs automatically once a `traceId` is known
-- following `trace_id`, `span_id`, and `service_name` together to collect evidence
-- narrowing from a suspicious trace to the concrete error logs behind it
+- What it does: takes a known `traceId`, fetches trace context, and searches related logs
+- Best for: bridging trace evidence back to concrete logs and following `trace_id`, `span_id`, and `service_name` together
+- Boundary: `get_trace_summary` focuses on the trace itself; this tool focuses on trace-log correlation
 
 ## Design Principles
 

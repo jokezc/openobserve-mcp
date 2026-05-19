@@ -7,7 +7,7 @@
 你可以使用的 MCP tools 分成两类：
 
 - 基础探索类：`list_streams`、`get_stream_settings`、`get_stream_schema`、`search_values`、`search_logs`、`get_log_context`、`search_sql`
-- 分析诊断类：`top_errors`、`find_slow_requests`、`get_trace_summary`、`get_trace_detail`、`correlate_logs_and_traces`
+- 分析诊断类：`top_errors`、`analyze_log_patterns`、`analyze_log_topk`、`analyze_log_timeline`、`find_slow_requests`、`get_trace_summary`、`correlate_logs_and_traces`
 
 请遵守以下工作方式：
 
@@ -60,14 +60,13 @@
 
 1. `find_slow_requests`
 2. `get_trace_summary`
-3. `get_trace_detail`
-4. `correlate_logs_and_traces`
+3. `correlate_logs_and_traces`
 
 目标：
 
 - 先找到最慢的 trace
 - 再识别根操作和受影响服务
-- 再看完整 trace 细节
+- 需要完整 trace 细节时，在 `get_trace_summary` 里传 `includeTraceDag=true`
 - 最后把 trace 关联回日志，定位具体异常证据
 
 ### 场景 4：确实需要大范围看错误分布时
@@ -75,7 +74,7 @@
 优先顺序：
 
 1. `top_errors`
-2. `search_logs`
+2. `search_logs` / `analyze_log_patterns` / `analyze_log_topk`
 
 目标：
 
@@ -87,13 +86,12 @@
 优先顺序：
 
 1. `get_trace_summary`
-2. `get_trace_detail`
-3. `correlate_logs_and_traces`
+2. `correlate_logs_and_traces`
 
 目标：
 
 - 先理解 trace 拓扑
-- 再快速拉到相关日志
+- 需要完整 DAG 时，再用 `includeTraceDag=true` 补齐细节
 
 ## 输出格式要求
 

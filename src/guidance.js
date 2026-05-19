@@ -19,9 +19,9 @@ function buildInvestigationPrompt(args) {
     "6. Use a short bounded window first. If a precise timestamp is available, center the search around that event. Otherwise start with a short lookback such as 15m to 1h.",
     "7. After finding a representative error log, immediately use get_log_context to inspect surrounding lines.",
     "8. Only use search_values when field names are already known but candidate values are still unclear. Do not guess field names if they are unknown.",
-    "9. If a trace ID appears, pivot to get_trace_summary and then correlate_logs_and_traces. Use get_trace_detail only when the summary is insufficient.",
+    "9. If a trace ID appears, pivot to get_trace_summary and then correlate_logs_and_traces. Set includeTraceDag=true on get_trace_summary only when the summary is insufficient.",
     "10. If the user reports latency, timeout, or slowness without a concrete error log, use find_slow_requests first.",
-    "11. Use top_errors or analyze_log_patterns only for broad error distribution, not as the default first step for a specific alert or ID-based lookup.",
+    "11. Use top_errors, analyze_log_patterns, analyze_log_topk, or analyze_log_timeline only for broad error distribution, not as the default first step for a specific alert or ID-based lookup.",
     "12. Use search_sql only when the generic tools cannot express the needed filter or aggregation, or when you need an untruncated full stack/message.",
     "",
     "Required output format:",
@@ -54,7 +54,7 @@ Goal
 
 Decision tree
 - If the user gives a trace ID:
-  Use get_trace_summary, then get_trace_detail if needed, then correlate_logs_and_traces.
+  Use get_trace_summary, then correlate_logs_and_traces. Set includeTraceDag=true on get_trace_summary if needed.
 - If the user gives a specific error, request path, request ID, order ID, log ID, node name, or precise time:
   Use search_logs first.
 - If the user gives a concrete locator but the correct log stream is unknown:
@@ -62,7 +62,7 @@ Decision tree
 - If the stream name, field names, or filter values are unclear:
   Use list_streams, get_stream_settings, get_stream_schema, and search_values only as needed. Do not force schema discovery when direct log search is already possible.
 - If the user asks for broad error distribution:
-  Use top_errors, then inspect representative rows with search_logs.
+  Use top_errors first, then inspect representative rows with search_logs or deepen with analyze_log_patterns, analyze_log_topk, or analyze_log_timeline as needed.
 - If the user says requests are slow:
   Use find_slow_requests, then get_trace_summary, then correlate_logs_and_traces.
 
@@ -84,7 +84,7 @@ Examples
 - "management-2 had a NullPointerException at 2026-05-18 18:59":
   First use list_streams to identify candidate streams that match management and the production environment, then use search_logs with the node name, error keyword, and a tight time window around the event.
 - "Show the main errors in the last hour":
-  First use top_errors, then search_logs for one representative error.
+  First use top_errors, then search_logs or analyze_log_patterns for representative detail.
 
 Do not do this
 - Do not start with get_stream_schema when the user already gave enough clues for direct log search.

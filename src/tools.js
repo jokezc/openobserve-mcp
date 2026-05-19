@@ -175,7 +175,7 @@ function buildPagination(limit, offset = 0, total = null) {
 
 function buildFieldHelpMessage(streamName, streamType = "logs") {
   const target = streamName ? ` for stream "${streamName}"` : "";
-  return `The requested field may not exist${target}. Use get_stream_schema or get_stream_fields first to inspect the available ${streamType} fields, then retry with a valid field name.`;
+  return `The requested field may not exist${target}. Use get_stream_schema first to inspect the available ${streamType} fields, then retry with a valid field name.`;
 }
 
 function withFieldGuidance(error, streamName, streamType = "logs") {
@@ -625,32 +625,6 @@ export function registerTools(server, client, config) {
         streamType: input.streamType ?? "logs",
         summary: summarizeSchemaFields(rows),
         schema: sanitize(config, response),
-      });
-    },
-  );
-
-  server.registerTool(
-    "get_stream_fields",
-    {
-      title: "Get Stream Fields",
-      description: "Fetch the available fields for a stream. This is a more direct alias for get_stream_schema when you mainly need to see which field names exist before using filters, keywordField, or correlation fields.",
-      inputSchema: {
-        streamName: z.string().describe("Stream name."),
-        streamType: z.enum(["logs", "metrics", "traces"]).optional(),
-      },
-    },
-    async (input) => {
-      const response = await client.getStreamSchema({
-        streamName: input.streamName,
-        streamType: input.streamType ?? "logs",
-      });
-      const rows = normalizeSchemaRows(response);
-
-      return textResult("Stream fields", {
-        streamName: input.streamName,
-        streamType: input.streamType ?? "logs",
-        summary: summarizeSchemaFields(rows),
-        fields: sanitize(config, response),
       });
     },
   );
@@ -1410,13 +1384,14 @@ export function registerTools(server, client, config) {
     "get_trace_summary",
     {
       title: "Get Trace Summary",
-      description: "Summarize a trace DAG and key services for a single trace ID. Use this as the first trace step when a trace ID is already known or has just been discovered in logs.",
+      description: "Summarize a trace DAG and key services for a single trace ID. Use this as the first trace step when a trace ID is already known or has just been discovered in logs. Set includeTraceDag=true when the full DAG is needed in the same call.",
       inputSchema: {
         streamName: z.string().optional(),
         traceId: z.string(),
         lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
         startTime: z.number().int().optional(),
         endTime: z.number().int().optional(),
+        includeTraceDag: z.boolean().optional().describe("When true, include the full trace DAG/details in the response."),
       },
     },
     async (input) => {
@@ -1441,7 +1416,7 @@ export function registerTools(server, client, config) {
           range: client.describeRange(startTime, endTime),
           warning: traceData.warning,
           summary: summarizeTraceAggregate(response),
-          trace: sanitize(config, response),
+          trace: input.includeTraceDag ? sanitize(config, response) : undefined,
         });
       }
 
@@ -1468,66 +1443,7 @@ export function registerTools(server, client, config) {
           })),
           inferredMessageField,
         },
-        dag: sanitize(config, response),
-      });
-    },
-  );
-
-  server.registerTool(
-    "get_trace_detail",
-    {
-      title: "Get Trace Detail",
-      description: "Fetch the full trace DAG for a single trace ID without reducing it to a summary only. Use this after get_trace_summary when the high-level trace shape is not enough.",
-      inputSchema: {
-        streamName: z.string().optional(),
-        traceId: z.string(),
-        lookback: z.string().optional().describe("Relative time range like 7d, 12h, 30m, or 1d12h30m."),
-        startTime: z.number().int().optional(),
-        endTime: z.number().int().optional(),
-      },
-    },
-    async (input) => {
-      const streamName = input.streamName ?? config.defaultTraceStream;
-      if (!streamName) {
-        throw new Error("streamName is required unless OPENOBSERVE_DEFAULT_TRACE_STREAM is configured");
-      }
-
-      const { startTime, endTime } = withTimeRange(config, input, {});
-      const traceData = await getTraceDataWithFallback(client, {
-        streamName,
-        traceId: input.traceId,
-        startTime,
-        endTime,
-      });
-      const response = traceData.data;
-
-      if (traceData.mode !== "dag") {
-        return textResult("Trace detail", {
-          traceId: input.traceId,
-          streamName,
-          range: client.describeRange(startTime, endTime),
-          warning: traceData.warning,
-          summary: summarizeTraceAggregate(response),
-          traceAggregate: sanitize(config, response),
-        });
-      }
-
-      const nodes = extractTraceNodes(response);
-      const services = [...new Set(nodes.map((node) => node.service_name).filter(Boolean))];
-
-      return textResult("Trace detail", {
-        traceId: input.traceId,
-        streamName,
-        range: client.describeRange(startTime, endTime),
-        warning: traceData.warning,
-        summary: {
-          source: "dag",
-          spanCount: nodes.length,
-          edgeCount: Array.isArray(response?.edges) ? response.edges.length : 0,
-          serviceCount: services.length,
-          services,
-        },
-        traceDag: sanitize(config, response),
+        traceDag: input.includeTraceDag ? sanitize(config, response) : undefined,
       });
     },
   );

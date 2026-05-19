@@ -174,6 +174,33 @@ test("list_alerts normalizes alert list payloads", async () => {
   assert.equal(result.structuredContent.alerts[1].enabled, false);
 });
 
+test("top_errors aggregates frequent errors", async () => {
+  let capturedSql = null;
+  const { tools } = createHarness({
+    client: {
+      search: async ({ sql }) => {
+        capturedSql = sql;
+        return {
+          total: 2,
+          hits: [
+            { error_message: "NullPointerException", error_count: 12 },
+            { error_message: "TimeoutException", error_count: 7 },
+          ],
+        };
+      },
+    },
+  });
+
+  const result = await tools.get("top_errors").handler({
+    lookback: "1h",
+    limit: 5,
+  });
+
+  assert.match(capturedSql, /COUNT\(\*\) AS error_count/);
+  assert.equal(result.structuredContent.result.hits[0].error_message, "NullPointerException");
+  assert.equal(result.structuredContent.result.hits[0].error_count, 12);
+});
+
 test("search_logs truncates oversized log messages in model-facing output", async () => {
   const longMessage = "x".repeat(2200);
   const { tools } = createHarness({
@@ -435,7 +462,7 @@ test("search_logs adds schema guidance when a filter field is missing", async ()
       filters: { node_name: "management-2" },
       lookback: "15m",
     }),
-    /Use get_stream_schema or get_stream_fields first to inspect the available logs fields/,
+    /Use get_stream_schema first to inspect the available logs fields/,
   );
 });
 
@@ -454,29 +481,36 @@ test("search_values adds schema guidance when a field is missing", async () => {
       fields: ["node_name"],
       lookback: "15m",
     }),
-    /Use get_stream_schema or get_stream_fields first to inspect the available logs fields/,
+    /Use get_stream_schema first to inspect the available logs fields/,
   );
 });
 
-test("get_stream_fields exposes a direct alias for schema discovery", async () => {
+test("get_trace_summary can include full dag details when requested", async () => {
   const { tools } = createHarness({
     client: {
-      getStreamSchema: async () => ({
-        schema: [
-          { name: "_timestamp", type: "Utf8" },
-          { name: "message", type: "Utf8" },
+      getTraceDag: async () => ({
+        nodes: [
+          {
+            span_id: "span-1",
+            service_name: "gateway",
+            operation_name: "GET /demo",
+            span_status: "ERROR",
+          },
         ],
+        edges: [],
       }),
     },
   });
 
-  const result = await tools.get("get_stream_fields").handler({
-    streamName: "prod_management",
+  const result = await tools.get("get_trace_summary").handler({
+    traceId: "trace-1",
+    lookback: "15m",
+    includeTraceDag: true,
   });
 
-  assert.equal(result.structuredContent.streamName, "prod_management");
-  assert.equal(result.structuredContent.summary.fieldCount, 2);
-  assert.equal(result.structuredContent.fields.schema[0].name, "_timestamp");
+  assert.equal(result.structuredContent.summary.source, "dag");
+  assert.ok(result.structuredContent.traceDag);
+  assert.equal(result.structuredContent.traceDag.nodes[0].service_name, "gateway");
 });
 
 test("search_logs accepts readable start and end datetime strings", async () => {

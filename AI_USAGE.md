@@ -52,6 +52,8 @@ Use:
 
 - `top_errors`
 - `search_logs`
+- `analyze_log_patterns`
+- `analyze_log_topk`
 - `search_sql`
 
 Purpose:
@@ -65,7 +67,6 @@ Use:
 
 - `find_slow_requests`
 - `get_trace_summary`
-- `get_trace_detail`
 - `correlate_logs_and_traces`
 
 Purpose:
@@ -79,7 +80,7 @@ Suggested flow:
 1. run `find_slow_requests`
 2. choose a suspicious trace
 3. run `get_trace_summary`
-4. if more detail is needed, run `get_trace_detail`
+4. if more detail is needed, rerun `get_trace_summary` with `includeTraceDag=true`
 5. run `correlate_logs_and_traces`
 
 ### 5. If the user already has a trace ID
@@ -87,7 +88,6 @@ Suggested flow:
 Use:
 
 - `get_trace_summary`
-- `get_trace_detail`
 - `correlate_logs_and_traces`
 
 Purpose:
@@ -122,10 +122,11 @@ It should summarize:
 - `search_logs`: fetch raw log evidence
 - `search_sql`: run custom read-only SQL when generic tools are not enough
 - `top_errors`: aggregate dominant error messages for broad scans
+- `analyze_log_patterns`: normalize and rank dominant recurring log patterns
+- `analyze_log_topk`: summarize the most frequent values for a chosen field
 - `get_log_context`: inspect nearby lines around one event
 - `find_slow_requests`: identify slow traces
-- `get_trace_summary`: summarize one trace DAG
-- `get_trace_detail`: fetch the full trace DAG for deeper inspection
+- `get_trace_summary`: summarize one trace DAG and optionally include full DAG details
 - `correlate_logs_and_traces`: connect trace evidence back to logs
 
 ## Preferred Behavior
