@@ -171,16 +171,57 @@ function buildPagination(limit, offset = 0, total = null) {
   };
 }
 
-function buildSearchResultPayload(config, response) {
+function truncateLogMessage(text, maxChars) {
+  if (typeof text !== "string" || maxChars === 0 || text.length <= maxChars) {
+    return text;
+  }
+
+  const omitted = text.length - maxChars;
+  return `${text.slice(0, maxChars)}... [truncated ${omitted} chars]`;
+}
+
+function formatLogRowPreview(row, config) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return row;
+  }
+
+  return {
+    ...row,
+    message: truncateLogMessage(row.message, config.logMessageCharLimit),
+  };
+}
+
+function formatLogResponsePreview(response, config) {
+  if (!response || typeof response !== "object") {
+    return response;
+  }
+
+  return {
+    ...response,
+    hits: Array.isArray(response.hits)
+      ? response.hits.map((row) => formatLogRowPreview(row, config))
+      : response.hits,
+  };
+}
+
+function buildSearchResultPayload(config, response, options = {}) {
   const summary = summarizeSearchResponse(response);
   const warning = summary.summaryOnly
     ? "This OpenObserve instance returned summary-only search hits for _search. The count is valid, but raw rows were not returned by the backend."
     : null;
+  const sanitized = sanitize(config, response);
+  const result = options.logPreview ? formatLogResponsePreview(sanitized, config) : sanitized;
 
   return {
     summary,
     warning,
-    result: sanitize(config, response),
+    truncation: options.logPreview
+      ? {
+          messageField: "message",
+          messageCharLimit: config.logMessageCharLimit,
+        }
+      : undefined,
+    result,
   };
 }
 
@@ -188,14 +229,21 @@ function extractSearchHits(response) {
   return Array.isArray(response?.hits) ? response.hits : [];
 }
 
-function buildLogSearchSql(streamName, input, limit) {
+function buildSelectColumns(columns) {
+  return columns.map((column) => quoteIdentifierForFrom(column)).join(", ");
+}
+
+function buildLogSearchSql(streamName, input, limit, config) {
   const clauses = [
     input.keyword ? buildContainsClause(input.keywordField, input.keyword) : undefined,
     ...buildEqualityClauses(input.filters),
   ];
   const whereClause = buildWhereClause(clauses);
+  const columns = Array.isArray(input.columns) && input.columns.length > 0
+    ? input.columns
+    : config.defaultLogColumns;
 
-  return `SELECT * FROM ${quoteIdentifierForFrom(streamName)}${whereClause} ORDER BY _timestamp DESC LIMIT ${limit}`;
+  return `SELECT ${buildSelectColumns(columns)} FROM ${quoteIdentifierForFrom(streamName)}${whereClause} ORDER BY _timestamp DESC LIMIT ${limit}`;
 }
 
 async function searchLogRows(client, config, input) {
@@ -207,7 +255,7 @@ async function searchLogRows(client, config, input) {
   const { startTime, endTime } = withTimeRange(config, input, {});
   const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
   const offset = input.offset ?? 0;
-  const sql = buildLogSearchSql(streamName, input, limit);
+  const sql = buildLogSearchSql(streamName, input, limit, config);
   const response = await client.search({
     sql,
     streamType: "logs",
@@ -441,7 +489,7 @@ export function registerTools(server, client, config) {
     "search_sql",
     {
       title: "Search SQL",
-      description: "Run a bounded read-only SQL query against OpenObserve for cases where generic tools are not enough.",
+      description: "Run a bounded read-only SQL query against OpenObserve only when the generic tools are not enough. Do not use this as the default first step for alert investigation when search_logs, get_log_context, schema discovery, or trace tools already fit the problem.",
       inputSchema: {
         sql: z.string().describe("Read-only SELECT SQL query."),
         streamType: z.enum(["logs", "metrics", "traces"]).optional().describe("OpenObserve stream type for the query."),
@@ -480,7 +528,7 @@ export function registerTools(server, client, config) {
     "get_stream_settings",
     {
       title: "Get Stream Settings",
-      description: "Fetch a single stream's metadata, query-relevant settings, and stats.",
+      description: "Fetch a single stream's metadata, query-relevant settings, and stats. Use this after you have identified a candidate stream and need to understand which fields are indexed, searchable, or good filter candidates before querying it.",
       inputSchema: {
         streamName: z.string().describe("Exact stream name."),
         streamType: z.enum(["logs", "metrics", "traces"]).optional(),
@@ -511,7 +559,7 @@ export function registerTools(server, client, config) {
     "get_stream_schema",
     {
       title: "Get Stream Schema",
-      description: "Fetch stream schema and derive hints for fields that are useful in troubleshooting.",
+      description: "Fetch stream schema and derive hints for fields useful in troubleshooting. Use this only when field names or correlation fields are unclear and that uncertainty blocks the next query. Do not use this as the default first step when the user already provided concrete log clues such as an error message, request path, node name, order ID, request ID, log ID, or timestamp.",
       inputSchema: {
         streamName: z.string().describe("Stream name."),
         streamType: z.enum(["logs", "metrics", "traces"]).optional(),
@@ -537,7 +585,7 @@ export function registerTools(server, client, config) {
     "search_values",
     {
       title: "Search Values",
-      description: "List distinct values for one or more fields in a bounded time range.",
+      description: "List distinct values for one or more fields in a bounded time range. Use this after schema discovery when field names are known but candidate filter values such as service_name, level, env, namespace, or node are still unclear. Do not use this as the first step for order IDs, request IDs, trace IDs, log IDs, or exact error keywords.",
       inputSchema: {
         streamName: z.string().optional().describe("Log stream name. Defaults to OPENOBSERVE_DEFAULT_LOG_STREAM when set."),
         fields: z.array(z.string()).min(1).max(10).describe("Field names to inspect."),
@@ -585,9 +633,10 @@ export function registerTools(server, client, config) {
     "search_logs",
     {
       title: "Search Logs",
-      description: "Search logs within a bounded time range using keyword and field filters.",
+      description: "Search logs within a bounded time range using keyword and field filters. This is the default first step when the user already gave concrete clues such as a short unique ID, request path, trace ID, order ID, request ID, log ID, node name, project name, business ID, exception type, or a precise timestamp. When parsing a pasted log, prefer high-specificity locators such as short IDs, business IDs, request paths, and timestamps over generic framework terms like GlobalExceptionHandler. If the correct log stream is unknown, discover candidate log streams first with list_streams and then search those candidate log streams directly instead of requiring schema discovery.",
       inputSchema: {
         streamName: z.string().optional().describe("Log stream name. Defaults to OPENOBSERVE_DEFAULT_LOG_STREAM when set."),
+        columns: z.array(z.string()).min(1).max(20).optional().describe("Optional columns to select. Defaults to a compact log view with _timestamp and source."),
         keyword: z.string().optional().describe("Keyword to search for. Searches all text fields by default."),
         keywordField: z.string().optional().describe("Optional field name for keyword matching."),
         filters: z.record(z.union([z.string(), z.number(), z.boolean()])).optional().describe("Optional equality filters, for example {\"service_name\":\"api\"}."),
@@ -606,7 +655,7 @@ export function registerTools(server, client, config) {
         sql,
         range: client.describeRange(startTime, endTime),
         pagination: buildPagination(limit, offset, response?.total ?? null),
-        ...buildSearchResultPayload(config, response),
+        ...buildSearchResultPayload(config, response, { logPreview: true }),
       });
     },
   );
@@ -615,7 +664,7 @@ export function registerTools(server, client, config) {
     "analyze_log_patterns",
     {
       title: "Analyze Log Patterns",
-      description: "Normalize log messages and rank the most frequent recurring patterns within a bounded time range.",
+      description: "Normalize log messages and rank the most frequent recurring patterns within a bounded time range. Use this for broad pattern discovery after you already know which log slice you care about, not as the first step for a targeted lookup by ID or exact keyword.",
       inputSchema: {
         streamName: z.string().optional().describe("Log stream name. Defaults to OPENOBSERVE_DEFAULT_LOG_STREAM when set."),
         keyword: z.string().optional().describe("Keyword to narrow the log set before pattern analysis."),
@@ -690,7 +739,7 @@ export function registerTools(server, client, config) {
     "analyze_log_topk",
     {
       title: "Analyze Log TopK",
-      description: "Group log rows by a field and return the most frequent values within a bounded time range.",
+      description: "Group log rows by a field and return the most frequent values within a bounded time range. Use this to summarize distributions after you already have a relevant log slice, not as the first step for a targeted lookup by ID or exact keyword.",
       inputSchema: {
         streamName: z.string().optional().describe("Log stream name. Defaults to OPENOBSERVE_DEFAULT_LOG_STREAM when set."),
         keyword: z.string().optional().describe("Keyword to narrow the log set before aggregation."),
@@ -757,7 +806,7 @@ export function registerTools(server, client, config) {
     "analyze_log_timeline",
     {
       title: "Analyze Log Timeline",
-      description: "Bucket log rows over time to reveal traffic spikes or bursty error windows within a bounded time range.",
+      description: "Bucket log rows over time to reveal traffic spikes or bursty error windows within a bounded time range. Use this to understand time concentration after you already identified a relevant log slice.",
       inputSchema: {
         streamName: z.string().optional().describe("Log stream name. Defaults to OPENOBSERVE_DEFAULT_LOG_STREAM when set."),
         keyword: z.string().optional().describe("Keyword to narrow the log set before timeline analysis."),
@@ -828,7 +877,7 @@ export function registerTools(server, client, config) {
     "top_errors",
     {
       title: "Top Errors",
-      description: "Aggregate the most frequent error messages in a log stream over a time range.",
+      description: "Aggregate the most frequent error messages in a log stream over a time range. Use this for broad scans such as 'what are the main errors recently', not as the default first step for a specific alert that already has concrete clues.",
       inputSchema: {
         streamName: z.string().optional(),
         messageField: z.string().optional().describe("Field used as the error message. Defaults to log."),
@@ -893,7 +942,7 @@ export function registerTools(server, client, config) {
         sql,
         range: client.describeRange(startTime, endTime),
         pagination: buildPagination(limit, offset, response?.total ?? null),
-        ...buildSearchResultPayload(config, response),
+        ...buildSearchResultPayload(config, response, { logPreview: true }),
       });
     },
   );
@@ -902,7 +951,7 @@ export function registerTools(server, client, config) {
     "list_streams",
     {
       title: "List Streams",
-      description: "List streams by type with optional keyword filtering.",
+      description: "List streams by type with optional keyword filtering. Use this when you do not yet know which log or trace stream to investigate, especially to find candidate log streams before direct log search when no default log stream is configured.",
       inputSchema: {
         streamType: z.enum(["logs", "metrics", "traces"]).optional(),
         keyword: z.string().optional(),
@@ -1040,7 +1089,7 @@ export function registerTools(server, client, config) {
     "list_alerts",
     {
       title: "List Alerts",
-      description: "List alert definitions configured in the current OpenObserve organization.",
+      description: "List alert definitions configured in the current OpenObserve organization. Use this to inspect alert coverage and rule context, not to investigate a specific runtime error unless rule details are part of the question.",
       inputSchema: {},
     },
     async () => {
@@ -1060,7 +1109,7 @@ export function registerTools(server, client, config) {
     "get_log_context",
     {
       title: "Get Log Context",
-      description: "Fetch log lines around a known timestamp to inspect surrounding context.",
+      description: "Fetch log lines around a known timestamp to inspect surrounding context. Use this immediately after finding a representative error log with search_logs so you can inspect the before-and-after evidence for the same incident.",
       inputSchema: {
         streamName: z.string().optional(),
         timestamp: z.number().int().describe("Target log _timestamp in microseconds."),
@@ -1084,7 +1133,11 @@ export function registerTools(server, client, config) {
         streamName,
         pivotTimestamp: input.timestamp,
         pivotTimeIso: formatMicros(input.timestamp),
-        result: sanitize(config, response),
+        truncation: {
+          messageField: "message",
+          messageCharLimit: config.logMessageCharLimit,
+        },
+        result: formatLogResponsePreview(sanitize(config, response), config),
       });
     },
   );
@@ -1093,7 +1146,7 @@ export function registerTools(server, client, config) {
     "correlate_logs_and_traces",
     {
       title: "Correlate Logs And Traces",
-      description: "Given a trace ID, fetch the trace DAG and search for related log lines using trace, span, and service fields.",
+      description: "Given a trace ID, fetch the trace DAG and search for related log lines using trace, span, and service fields. Use this after you already have a trace ID from the user, a log line, or a previous trace query.",
       inputSchema: {
         traceId: z.string().describe("Trace ID to correlate against logs."),
         traceStreamName: z.string().optional().describe("Trace stream name. Defaults to OPENOBSERVE_DEFAULT_TRACE_STREAM when set."),
@@ -1168,7 +1221,7 @@ export function registerTools(server, client, config) {
 
       const limit = clamp(input.limit ?? config.defaultLogRows, config.maxLogRows);
       const offset = input.offset ?? 0;
-      const sql = `SELECT * FROM ${quoteIdentifierForFrom(logStreamName)}${buildWhereClause([correlationClause])} ORDER BY _timestamp DESC LIMIT ${limit}`;
+      const sql = `SELECT ${buildSelectColumns(config.defaultLogColumns)} FROM ${quoteIdentifierForFrom(logStreamName)}${buildWhereClause([correlationClause])} ORDER BY _timestamp DESC LIMIT ${limit}`;
       const relatedLogs = await client.search({
         sql,
         streamType: "logs",
@@ -1214,7 +1267,7 @@ export function registerTools(server, client, config) {
               })),
             }
           : summarizeTraceAggregate(trace),
-        relatedLogs: buildSearchResultPayload(config, relatedLogs),
+        relatedLogs: buildSearchResultPayload(config, relatedLogs, { logPreview: true }),
         traceData: sanitize(config, trace),
       });
     },
@@ -1224,7 +1277,7 @@ export function registerTools(server, client, config) {
     "find_slow_requests",
     {
       title: "Find Slow Requests",
-      description: "Find traces with the largest duration in a recent time range.",
+      description: "Find traces with the largest duration in a recent time range. Use this when the user reports latency, timeout, or slowness rather than a specific error log.",
       inputSchema: {
         streamName: z.string().optional(),
         filter: z.string().optional().describe("OpenObserve trace filter expression, for example service_name='gateway'."),
@@ -1268,7 +1321,7 @@ export function registerTools(server, client, config) {
     "get_trace_summary",
     {
       title: "Get Trace Summary",
-      description: "Summarize a trace DAG and key services for a single trace ID.",
+      description: "Summarize a trace DAG and key services for a single trace ID. Use this as the first trace step when a trace ID is already known or has just been discovered in logs.",
       inputSchema: {
         streamName: z.string().optional(),
         traceId: z.string(),
@@ -1335,7 +1388,7 @@ export function registerTools(server, client, config) {
     "get_trace_detail",
     {
       title: "Get Trace Detail",
-      description: "Fetch the full trace DAG for a single trace ID without reducing it to a summary only.",
+      description: "Fetch the full trace DAG for a single trace ID without reducing it to a summary only. Use this after get_trace_summary when the high-level trace shape is not enough.",
       inputSchema: {
         streamName: z.string().optional(),
         traceId: z.string(),

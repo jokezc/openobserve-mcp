@@ -31,9 +31,11 @@ function createHarness(overrides = {}) {
   const config = {
     defaultLogStream: "app_logs",
     defaultTraceStream: "default",
+    defaultLogColumns: ["_timestamp", "message"],
     defaultLookback: "1h",
     defaultLogRows: 50,
     defaultStreamRows: 20,
+    logMessageCharLimit: 1000,
     maxRangeMicros: 7 * 24 * 60 * 60 * 1_000_000,
     maxRangeLabel: "7d",
     maxLogRows: 500,
@@ -169,4 +171,146 @@ test("list_alerts normalizes alert list payloads", async () => {
   assert.equal(result.structuredContent.summary.count, 2);
   assert.equal(result.structuredContent.alerts[0].name, "High Error Rate");
   assert.equal(result.structuredContent.alerts[1].enabled, false);
+});
+
+test("search_logs truncates oversized log messages in model-facing output", async () => {
+  const longMessage = "x".repeat(1200);
+  const { tools } = createHarness({
+    client: {
+      search: async () => ({
+        total: 1,
+        hits: [
+          {
+            _timestamp: 1,
+            message: longMessage,
+            service_name: "management",
+          },
+        ],
+      }),
+    },
+  });
+
+  const result = await tools.get("search_logs").handler({
+    keyword: "NullPointerException",
+    lookback: "15m",
+    limit: 5,
+  });
+
+  const previewMessage = result.structuredContent.result.hits[0].message;
+  assert.equal(typeof previewMessage, "string");
+  assert.match(previewMessage, /\[truncated 200 chars\]$/);
+  assert.ok(previewMessage.length < longMessage.length);
+  assert.equal(result.structuredContent.truncation.messageCharLimit, 1000);
+});
+
+test("search_logs defaults to compact message-based column selection", async () => {
+  let capturedSql = null;
+  const { tools } = createHarness({
+    client: {
+      search: async ({ sql }) => {
+        capturedSql = sql;
+        return {
+          total: 1,
+          hits: [{ _timestamp: 1, source: "row-1" }],
+        };
+      },
+    },
+  });
+
+  await tools.get("search_logs").handler({
+    keyword: "row",
+    lookback: "15m",
+  });
+
+  assert.match(capturedSql, /SELECT "_timestamp", "message" FROM "app_logs"/);
+});
+
+test("search_logs uses caller-provided columns when specified", async () => {
+  let capturedSql = null;
+  const { tools } = createHarness({
+    client: {
+      search: async ({ sql }) => {
+        capturedSql = sql;
+        return {
+          total: 1,
+          hits: [{ _timestamp: 1, level: "ERROR", message: "row-1" }],
+        };
+      },
+    },
+  });
+
+  await tools.get("search_logs").handler({
+    keyword: "row",
+    lookback: "15m",
+    columns: ["_timestamp", "level", "message"],
+  });
+
+  assert.match(capturedSql, /SELECT "_timestamp", "level", "message" FROM "app_logs"/);
+});
+
+test("correlate_logs_and_traces uses configured default log columns", async () => {
+  const searches = [];
+  const { tools } = createHarness({
+    config: {
+      defaultLogColumns: ["_timestamp", "level", "message"],
+    },
+    client: {
+      getTraceDag: async () => ({
+        nodes: [
+          {
+            span_id: "span-1",
+            service_name: "management",
+            operation_name: "GET /demo",
+          },
+        ],
+        edges: [],
+      }),
+      getStreamSchema: async () => ({
+        schema: [
+          { name: "trace_id" },
+          { name: "span_id" },
+          { name: "service_name" },
+        ],
+      }),
+      search: async ({ sql }) => {
+        searches.push(sql);
+        return { total: 0, hits: [] };
+      },
+    },
+  });
+
+  await tools.get("correlate_logs_and_traces").handler({
+    traceId: "trace-1",
+    lookback: "15m",
+  });
+
+  assert.match(searches[0], /SELECT "_timestamp", "level", "message" FROM "app_logs"/);
+});
+
+test("search_logs does not truncate message when char limit is zero", async () => {
+  const longMessage = "x".repeat(1200);
+  const { tools } = createHarness({
+    config: {
+      logMessageCharLimit: 0,
+    },
+    client: {
+      search: async () => ({
+        total: 1,
+        hits: [
+          {
+            _timestamp: 1,
+            message: longMessage,
+          },
+        ],
+      }),
+    },
+  });
+
+  const result = await tools.get("search_logs").handler({
+    keyword: "x",
+    lookback: "15m",
+  });
+
+  assert.equal(result.structuredContent.result.hits[0].message, longMessage);
+  assert.equal(result.structuredContent.truncation.messageCharLimit, 0);
 });

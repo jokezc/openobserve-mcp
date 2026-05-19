@@ -39,12 +39,22 @@ function parseNonNegativeIntEnv(name, fallback) {
   return value;
 }
 
+function parseCsvEnv(name, fallback) {
+  const raw = process.env[name];
+  const source = raw && raw.trim() ? raw : fallback;
+
+  return source
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function normalizeBaseUrl(url) {
   return url.endsWith("/") ? url.slice(0, -1) : url;
 }
 
 function parseMaxRangeConfig() {
-  const durationLike = process.env.OPENOBSERVE_MAX_RANGE ?? "7d";
+  const durationLike = process.env.OPENOBSERVE_MAX_RANGE ?? "31d";
   if (durationLike !== undefined && durationLike !== "") {
     const normalized = durationLike.trim().toLowerCase();
     if (normalized === "0") {
@@ -98,10 +108,12 @@ export function loadConfig() {
     username,
     password,
     defaultLogStream: process.env.OPENOBSERVE_DEFAULT_LOG_STREAM || undefined,
-    defaultTraceStream: process.env.OPENOBSERVE_DEFAULT_TRACE_STREAM || undefined,
+    defaultTraceStream: process.env.OPENOBSERVE_DEFAULT_TRACE_STREAM || "default",
+    defaultLogColumns: parseCsvEnv("OPENOBSERVE_DEFAULT_LOG_COLUMNS", "_timestamp,message"),
     defaultLookback: parseDurationEnv("OPENOBSERVE_DEFAULT_LOOKBACK", "3d"),
-    defaultLogRows: parseNonNegativeIntEnv("OPENOBSERVE_DEFAULT_LOG_ROWS", 100),
+    defaultLogRows: parseNonNegativeIntEnv("OPENOBSERVE_DEFAULT_LOG_ROWS", 50),
     defaultStreamRows: parseNonNegativeIntEnv("OPENOBSERVE_DEFAULT_STREAM_ROWS", 100),
+    logMessageCharLimit: parseNonNegativeIntEnv("OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT", 1000),
     // 0 means "do not enforce an upper bound" for experience-first usage.
     maxRangeMicros,
     maxRangeLabel,
