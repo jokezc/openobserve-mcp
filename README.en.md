@@ -37,11 +37,8 @@ After publishing, the package can be used directly with `npx`:
       ],
       "env": {
         "OPENOBSERVE_BASE_URL": "http://127.0.0.1:5080",
-        "OPENOBSERVE_ORG_ID": "default",
         "OPENOBSERVE_USERNAME": "your_username",
-        "OPENOBSERVE_PASSWORD": "your_password",
-        "OPENOBSERVE_DEFAULT_LOG_STREAM": "app_logs",
-        "OPENOBSERVE_DEFAULT_TRACE_STREAM": "default"
+        "OPENOBSERVE_PASSWORD": "your_password"
       }
     }
   }
