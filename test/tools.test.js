@@ -35,7 +35,8 @@ function createHarness(overrides = {}) {
     defaultLookback: "1h",
     defaultLogRows: 50,
     defaultStreamRows: 20,
-    logMessageCharLimit: 1000,
+    logMessageCharLimit: 2000,
+    logMessageNoTruncateKeywords: ["ERROR", "WARN"],
     maxRangeMicros: 7 * 24 * 60 * 60 * 1_000_000,
     maxRangeLabel: "7d",
     maxLogRows: 500,
@@ -174,7 +175,7 @@ test("list_alerts normalizes alert list payloads", async () => {
 });
 
 test("search_logs truncates oversized log messages in model-facing output", async () => {
-  const longMessage = "x".repeat(1200);
+  const longMessage = "x".repeat(2200);
   const { tools } = createHarness({
     client: {
       search: async () => ({
@@ -200,7 +201,7 @@ test("search_logs truncates oversized log messages in model-facing output", asyn
   assert.equal(typeof previewMessage, "string");
   assert.match(previewMessage, /\[truncated 200 chars\]$/);
   assert.ok(previewMessage.length < longMessage.length);
-  assert.equal(result.structuredContent.truncation.messageCharLimit, 1000);
+  assert.equal(result.structuredContent.truncation.messageCharLimit, 2000);
 });
 
 test("search_logs defaults to compact message-based column selection", async () => {
@@ -252,7 +253,7 @@ test("correlate_logs_and_traces uses configured default log columns", async () =
   const searches = [];
   const { tools } = createHarness({
     config: {
-      defaultLogColumns: ["_timestamp", "level", "message"],
+      defaultLogColumns: ["_timestamp", "message"],
     },
     client: {
       getTraceDag: async () => ({
@@ -284,7 +285,7 @@ test("correlate_logs_and_traces uses configured default log columns", async () =
     lookback: "15m",
   });
 
-  assert.match(searches[0], /SELECT "_timestamp", "level", "message" FROM "app_logs"/);
+  assert.match(searches[0], /SELECT "_timestamp", "message" FROM "app_logs"/);
 });
 
 test("search_logs does not truncate message when char limit is zero", async () => {
@@ -313,6 +314,110 @@ test("search_logs does not truncate message when char limit is zero", async () =
 
   assert.equal(result.structuredContent.result.hits[0].message, longMessage);
   assert.equal(result.structuredContent.truncation.messageCharLimit, 0);
+});
+
+test("search_logs does not truncate error-level messages", async () => {
+  const longMessage = "x".repeat(2200);
+  const { tools } = createHarness({
+    client: {
+      search: async () => ({
+        total: 1,
+        hits: [
+          {
+            _timestamp: 1,
+            level: "ERROR",
+            message: longMessage,
+          },
+        ],
+      }),
+    },
+  });
+
+  const result = await tools.get("search_logs").handler({
+    keyword: "x",
+    lookback: "15m",
+  });
+
+  assert.equal(result.structuredContent.result.hits[0].message, longMessage);
+  assert.equal(result.structuredContent.truncation.messageCharLimit, 2000);
+});
+
+test("search_logs does not truncate messages containing configured keywords", async () => {
+  const longMessage = `WARN ${"x".repeat(2195)}`;
+  const { tools } = createHarness({
+    client: {
+      search: async () => ({
+        total: 1,
+        hits: [
+          {
+            _timestamp: 1,
+            message: longMessage,
+          },
+        ],
+      }),
+    },
+  });
+
+  const result = await tools.get("search_logs").handler({
+    keyword: "WARN",
+    lookback: "15m",
+  });
+
+  assert.equal(result.structuredContent.result.hits[0].message, longMessage);
+});
+
+test("search_logs truncates messages when configured keywords do not match", async () => {
+  const longMessage = `WARN ${"x".repeat(2195)}`;
+  const { tools } = createHarness({
+    config: {
+      logMessageNoTruncateKeywords: ["ERROR"],
+    },
+    client: {
+      search: async () => ({
+        total: 1,
+        hits: [
+          {
+            _timestamp: 1,
+            message: longMessage,
+          },
+        ],
+      }),
+    },
+  });
+
+  const result = await tools.get("search_logs").handler({
+    keyword: "WARN",
+    lookback: "15m",
+  });
+
+  assert.match(result.structuredContent.result.hits[0].message, /\[truncated 200 chars\]$/);
+});
+
+test("search_logs preserves spaces in configured keywords", async () => {
+  const longMessage = ` ERROR ${"x".repeat(2193)}`;
+  const { tools } = createHarness({
+    config: {
+      logMessageNoTruncateKeywords: [" ERROR "],
+    },
+    client: {
+      search: async () => ({
+        total: 1,
+        hits: [
+          {
+            _timestamp: 1,
+            message: longMessage,
+          },
+        ],
+      }),
+    },
+  });
+
+  const result = await tools.get("search_logs").handler({
+    keyword: "ERROR",
+    lookback: "15m",
+  });
+
+  assert.equal(result.structuredContent.result.hits[0].message, longMessage);
 });
 
 test("search_logs adds schema guidance when a filter field is missing", async () => {

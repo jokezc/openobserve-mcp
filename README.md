@@ -146,7 +146,8 @@ npm run smoke:live
 | `OPENOBSERVE_DEFAULT_LOOKBACK` | `3d` | 查询类工具默认时间窗口，支持 `7d`、`12h`、`30m`、`1d12h` |
 | `OPENOBSERVE_DEFAULT_LOG_ROWS` | `50` | 日志类查询工具默认返回条数 |
 | `OPENOBSERVE_DEFAULT_STREAM_ROWS` | `100` | Stream 列表类工具默认返回条数 |
-| `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT` | `1000` | 日志 `message` 字段的默认截断长度，填 `0` 表示不截断 |
+| `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT` | `2000` | 日志 `message` 字段的默认截断长度，填 `0` 表示不截断 |
+| `OPENOBSERVE_LOG_NO_TRUNCATE_KEYWORDS` | `ERROR,WARN` | `message` 中包含这些关键字时不截断日志，逗号分隔，大小写不敏感；关键字前后空格会保留 |
 | `OPENOBSERVE_MAX_RANGE` | `31d` | 单次允许查询的最大时间跨度，支持 `7d`、`12h`、`30m`、`1d12h`，填 `0` 表示不限制。它限制的是 start/end 之间的跨度，不限制你查多久以前的数据 |
 | `OPENOBSERVE_MAX_LOG_ROWS` | `1000` | 日志类工具允许返回的最大行数，填 `0` 表示不限制 |
 | `OPENOBSERVE_MAX_STREAM_ROWS` | `500` | Stream 列表类工具允许返回的最大行数，填 `0` 表示不限制 |
@@ -165,7 +166,7 @@ npm run smoke:live
 - `OPENOBSERVE_DEFAULT_LOG_STREAM` 默认为空，不会自动猜测日志 stream；未配置时需要在调用时显式传入
 - `OPENOBSERVE_DEFAULT_TRACE_STREAM` 默认值是 `default`
 - `search_logs` 默认查询列来自 `OPENOBSERVE_DEFAULT_LOG_COLUMNS`，默认值是 `_timestamp,message`
-- 日志正文默认按 `message` 字段处理，截断长度来自 `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT`，默认 `1000`，填 `0` 表示不截断
+- 日志正文默认按 `message` 字段处理，截断长度来自 `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT`，默认 `2000`，填 `0` 表示不截断；当日志级别为 `ERROR`，或 `message` 包含 `OPENOBSERVE_LOG_NO_TRUNCATE_KEYWORDS` 中的关键字时不会截断。这个关键字列表会保留每项前后空格，比如可配置成 ` ERROR , WARN ` 来贴近日志级别边界
 - 查询工具统一支持 `lookback`，格式如 `30m`、`6h`、`7d`、`1d12h`
 - 所有查询仍然会受 `OPENOBSERVE_MAX_RANGE`、`OPENOBSERVE_MAX_LOG_ROWS`、`OPENOBSERVE_MAX_STREAM_ROWS` 限制
 

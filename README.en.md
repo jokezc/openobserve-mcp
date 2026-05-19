@@ -148,7 +148,8 @@ npm run smoke:live
 | `OPENOBSERVE_DEFAULT_LOOKBACK` | `3d` | Default time window for query-oriented tools. Supports values like `7d`, `12h`, `30m`, and `1d12h` |
 | `OPENOBSERVE_DEFAULT_LOG_ROWS` | `50` | Default row count used by log-oriented query tools |
 | `OPENOBSERVE_DEFAULT_STREAM_ROWS` | `100` | Default row count used by stream listing tools |
-| `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT` | `1000` | Default truncation length for the log `message` field. Use `0` for unlimited |
+| `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT` | `2000` | Default truncation length for the log `message` field. Use `0` for unlimited |
+| `OPENOBSERVE_LOG_NO_TRUNCATE_KEYWORDS` | `ERROR,WARN` | Comma-separated keywords that disable truncation when found in `message`, case-insensitive; leading and trailing spaces are preserved |
 | `OPENOBSERVE_MAX_RANGE` | `31d` | Maximum allowed query span. Supports `7d`, `12h`, `30m`, `1d12h`; use `0` for unlimited. This limits the distance between start and end, not how far back in history the range begins |
 | `OPENOBSERVE_MAX_LOG_ROWS` | `1000` | Maximum rows returned by log-oriented tools. Use `0` for unlimited |
 | `OPENOBSERVE_MAX_STREAM_ROWS` | `500` | Maximum rows returned by stream listing tools. Use `0` for unlimited |
@@ -167,7 +168,7 @@ Default query behavior:
 - `OPENOBSERVE_DEFAULT_LOG_STREAM` is empty by default, so the server will not guess a log stream name for you
 - `OPENOBSERVE_DEFAULT_TRACE_STREAM` defaults to `default`
 - `search_logs` uses `OPENOBSERVE_DEFAULT_LOG_COLUMNS` by default, which defaults to `_timestamp,message`
-- Log body handling defaults to the `message` field, and truncation is controlled by `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT`, which defaults to `1000`; use `0` for unlimited
+- Log body handling defaults to the `message` field, and truncation is controlled by `OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT`, which defaults to `2000`; use `0` for unlimited. Rows with log level `ERROR`, or whose `message` contains any `OPENOBSERVE_LOG_NO_TRUNCATE_KEYWORDS` entry, are not truncated. Entries keep their surrounding spaces, so values like ` ERROR , WARN ` can be used to better match log-level boundaries
 - Query tools consistently support `lookback` values like `30m`, `6h`, `7d`, and `1d12h`
 - All queries are still constrained by `OPENOBSERVE_MAX_RANGE`, `OPENOBSERVE_MAX_LOG_ROWS`, and `OPENOBSERVE_MAX_STREAM_ROWS`
 

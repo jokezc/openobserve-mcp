@@ -198,6 +198,36 @@ function truncateLogMessage(text, maxChars) {
   return `${text.slice(0, maxChars)}... [truncated ${omitted} chars]`;
 }
 
+function isErrorLevelLogRow(row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return false;
+  }
+
+  const candidates = [row.level, row.log_level, row.severity, row.severity_text];
+  return candidates.some((value) => typeof value === "string" && value.trim().toUpperCase() === "ERROR");
+}
+
+function shouldSkipMessageTruncation(row, config) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return false;
+  }
+
+  if (isErrorLevelLogRow(row)) {
+    return true;
+  }
+
+  if (typeof row.message !== "string") {
+    return false;
+  }
+
+  const keywords = Array.isArray(config.logMessageNoTruncateKeywords)
+    ? config.logMessageNoTruncateKeywords
+    : [];
+  const upperMessage = row.message.toUpperCase();
+
+  return keywords.some((keyword) => keyword && upperMessage.includes(keyword));
+}
+
 function formatLogRowPreview(row, config) {
   if (!row || typeof row !== "object" || Array.isArray(row)) {
     return row;
@@ -205,7 +235,7 @@ function formatLogRowPreview(row, config) {
 
   return {
     ...row,
-    message: truncateLogMessage(row.message, config.logMessageCharLimit),
+    message: shouldSkipMessageTruncation(row, config) ? row.message : truncateLogMessage(row.message, config.logMessageCharLimit),
   };
 }
 

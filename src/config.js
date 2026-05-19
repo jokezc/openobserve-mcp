@@ -39,14 +39,15 @@ function parseNonNegativeIntEnv(name, fallback) {
   return value;
 }
 
-function parseCsvEnv(name, fallback) {
+function parseCsvEnv(name, fallback, options = {}) {
+  const { trimItems = true } = options;
   const raw = process.env[name];
   const source = raw && raw.trim() ? raw : fallback;
 
   return source
     .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
+    .map((item) => (trimItems ? item.trim() : item))
+    .filter((item) => item.trim().length > 0);
 }
 
 function normalizeBaseUrl(url) {
@@ -113,7 +114,9 @@ export function loadConfig() {
     defaultLookback: parseDurationEnv("OPENOBSERVE_DEFAULT_LOOKBACK", "3d"),
     defaultLogRows: parseNonNegativeIntEnv("OPENOBSERVE_DEFAULT_LOG_ROWS", 50),
     defaultStreamRows: parseNonNegativeIntEnv("OPENOBSERVE_DEFAULT_STREAM_ROWS", 100),
-    logMessageCharLimit: parseNonNegativeIntEnv("OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT", 1000),
+    logMessageCharLimit: parseNonNegativeIntEnv("OPENOBSERVE_LOG_MESSAGE_CHAR_LIMIT", 2000),
+    logMessageNoTruncateKeywords: parseCsvEnv("OPENOBSERVE_LOG_NO_TRUNCATE_KEYWORDS", "ERROR,WARN", { trimItems: false })
+      .map((keyword) => keyword.toUpperCase()),
     // 0 means "do not enforce an upper bound" for experience-first usage.
     maxRangeMicros,
     maxRangeLabel,
